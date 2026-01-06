@@ -3,75 +3,37 @@ description: "Run ROC deep packet inspection tool in your Github Actions workflo
 author: "SecurableAI"
 
 inputs:
-  server_url:
-    description: "License validation server URL"
-    required: true
-  api_key:
-    description: "API key for authentication"
-    required: true
-  project_name:
-    description: "Project name for ROC analysis (format: org/repo)"
-    required: true
-  patterns_yaml:
-    description: "YAML content for patterns file"
-    required: true
-  libssl_host_path:
-    description: "Path to libssl.so.3 on the host system"
-    required: false
-    default: "/lib/x86_64-linux-gnu/libssl.so.3"
-  libcrypto_host_path:
-    description: "Path to libcrypto.so.3 on the host system"
-    required: false
-    default: "/lib/x86_64-linux-gnu/libcrypto.so.3"
-  container_name:
-    description: "Name for the ROC container"
-    required: false
-    default: "roc-action-container"
-  output_dir:
-    description: "Directory for ROC output files"
-    required: false
-    default: "./roc-action-output"
-  args:
-    description: "Additional arguments to pass to Docker run"
-    required: false
-    default: ""
-  config-dir:
-    description: "Directory containing ROC config files"
-    required: false
-    default: "roc-config"
-  output-dir:
-    description: "Directory for ROC output files"
-    required: false
-    default: "roc-output"
-  docker-image:
-    description: "ROC Docker image to use"
-    required: false
-    default: "public.ecr.aws/f9o7b7m0/roc"
-  additional-args:
-    description: "Additional arguments to pass to ROC"
-    required: false
-    default: ""
-  ssl-lib-path:
-    description: "Path to SSL library on host system"
-    required: false
-    default: "/lib/x86_64-linux-gnu"
-  ssl-lib-version:
-    description: "SSL library version (3 for libssl.so.3, 1.1 for libssl.so.1.1)"
-    required: false
-    default: "3"
-
-outputs:
-  container-id:
-    description: "ROC container ID"
-  output-files:
-    description: "List of generated output files"
-  logs:
-    description: "ROC container logs"
+    server_url:
+        description: "Server URL for ROC"
+        required: true
+    api_key:
+        description: "API Key for ROC"
+        required: true
+    patterns_file:
+        description: "Patterns file for ROC"
+        required: true
+        default: "patterns.yaml"
+    watch_dir:
+        description: "Directory to watch"
+        required: true
+        default: "/tmp/roc-output"
+    project_identifier:
+        description: "Project identifier"
+        required: true
+    roc_binary_path:
+        description: "Path to the ROC binary"
+        required: false
+        default: "./roc"
+    setup_dependencies:
+        description: "Install dependencies like tshark"
+        required: false
+        default: "true"
 
 runs:
-  using: "node20"
-  main: "dist/index.js"
+    using: "node20"
+    main: "dist/index.js"
+    post: "dist/post/index.js"
 
 branding:
-  icon: "shield"
-  color: "blue"
+    icon: "shield"
+    color: "blue"

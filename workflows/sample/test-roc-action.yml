@@ -1,0 +1,59 @@
+name: Test ROC Action Package
+on:
+    workflow_dispatch:
+
+jobs:
+    test-roc-action:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
+            - name: Create Patterns File
+              run: |
+                  mkdir roc-resultsa
+                  cat <<EOF > patterns.yaml
+                  patterns:
+                    - id: "simple_number"
+                      regex: "1234"
+                    - id: "another_pattern"
+                      regex: "SECRET_[A-Z0-9]{16}"
+                    - id: "test_number"
+                      regex: "12345667788764"
+                  whitelist:
+                    domains:
+                      - "google.com"
+                      - "httpbin.org"
+                    urls:
+                      - "https://google.com"
+                  EOF
+
+            - name: Start ROC Agent
+              id: roc-start
+              uses: Securable-ai/roc-agent@main # Use the deployed action
+              with:
+                  server_url: https://api.codexsecurity.io
+                  api_key: ${{ secrets.ROC_API_KEY }}
+                  project_identifier: ${{ github.repository }}
+                  patterns_file: "patterns.yaml"
+                  watch_dir: "./roc-results"
+
+            - name: Simulate Network Traffic
+              run: |
+                  echo "ROC process started with PID: ${{ steps.roc-start.outputs.roc_pid }}"
+                  echo "Waiting for ROC to initialize..."
+                  sleep 60
+                  echo "Generating curl traffic..."
+                  curl -s -X POST "https://httpbin.org/post?test=12345667788764" \
+                    -H "Content-Type: application/json" \
+                    -d '{"data":"12345667788764"}'
+
+                  curl -s google.com
+
+                  echo "Waiting a bit more..."
+                  sleep 10
+
+                  echo "The 'post' part of the 'Start ROC Agent' step will now run automatically to stop the roc process."
