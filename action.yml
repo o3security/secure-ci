@@ -1,25 +1,79 @@
 name: "ROC Agent"
-description: "Run ROC deep packet inspection tool in your Github Actions workflow"
+description: "Run ROC binary in your GitHub Actions workflow"
 author: "SecurableAI"
 
 inputs:
     server_url:
-        description: "Server URL for ROC"
+        description: "License validation server URL (required for authentication)"
         required: true
+        default: "https://api.codexsecurity.io/graphql"
     api_key:
-        description: "API Key for ROC"
+        description: "API key for authentication (required - keep secure)"
         required: true
-    patterns_file:
-        description: "Patterns file for ROC"
+    project_name:
+        description: "Your github project name"
         required: true
-        default: "patterns.yaml"
-    watch_dir:
-        description: "Directory to watch"
-        required: true
+    pcap:
+        description: "Single PCAP/PCAPNG file to analyze for secrets and network traffic"
+        required: false
+    watch:
+        description: "Directory to monitor for new PCAP files (continuous processing mode)"
+        required: false
+    patterns:
+        description: "YAML file containing regex patterns for secret detection (optional)"
+        required: false
+    network_config:
+        description: "YAML file containing network include/exclude filtering rules"
+        required: false
+    interface:
+        description: "Network interface for live capture (auto-detected if not specified)"
+        required: false
+    ssl_lib:
+        description: "Custom SSL library path for TLS decryption (auto-detected by default)"
+        required: false
+    ssl_version:
+        description: "Specific SSL/TLS version to capture (auto-detected by default)"
+        required: false
+    pksize_lim:
+        description: "Minimum packet size threshold - only capture packets above this size"
+        required: false
+    rotation_interval:
+        description: "PCAP file rotation interval (e.g., 30s, 1m, 5m, 1h)"
+        required: false
+        default: "1m"
+    ecap_output_folder:
+        description: "Directory where PCAP files are stored"
+        required: false
         default: "/tmp/roc-output"
-    project_identifier:
-        description: "Project identifier"
-        required: true
+    source:
+        description: "Source identifier for tracking data origin"
+        required: false
+        default: "roc-sensor"
+    debug:
+        description: "Enable debug mode with verbose logging and local file output"
+        required: false
+        default: "false"
+    splunk_url:
+        description: "Splunk HEC URL for direct SIEM integration"
+        required: false
+    splunk_token:
+        description: "Splunk HEC token for authentication"
+        required: false
+    es_url:
+        description: "Elasticsearch cluster URL for direct integration"
+        required: false
+    es_index:
+        description: "Elasticsearch index name for storing analysis results"
+        required: false
+    es_user:
+        description: "Elasticsearch username for authentication"
+        required: false
+    es_pass:
+        description: "Elasticsearch password for authentication"
+        required: false
+    config:
+        description: "Path to configuration file (YAML/JSON) for complex setups"
+        required: false
     roc_binary_path:
         description: "Path to the ROC binary"
         required: false

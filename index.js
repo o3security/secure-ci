@@ -8,13 +8,6 @@ async function run() {
         core.info("Starting ROC Action...");
 
         // Get inputs from workflow
-        const serverUrl = core.getInput("server_url", { required: true });
-        const apiKey = core.getInput("api_key", { required: true });
-        const projectIdentifier = core.getInput("project_identifier", {
-            required: true,
-        });
-        const patternsFile = core.getInput("patterns_file", { required: true });
-        const watchDir = core.getInput("watch_dir", { required: true });
         const rocBinaryPath = core.getInput("roc_binary_path", {
             required: true,
         });
@@ -35,25 +28,51 @@ async function run() {
             ]);
         }
 
-        core.info(`Ensuring watch directory exists at ${watchDir}`);
-        await fs.ensureDir(watchDir);
+        const watchDir = core.getInput("watch");
+        if (watchDir) {
+            core.info(`Ensuring watch directory exists at ${watchDir}`);
+            await fs.ensureDir(watchDir);
+        }
 
         core.info(`Making ROC binary executable at ${rocBinaryPath}`);
         await exec.exec("chmod", ["+x", rocBinaryPath]);
 
-        const rocArgs = [
-            rocBinaryPath,
-            "--server-url",
-            serverUrl,
-            "--api-key",
-            apiKey,
-            "--patterns",
-            patternsFile,
-            "--watch",
-            watchDir,
-            "-p",
-            projectIdentifier,
-        ];
+        // Construct arguments for the roc binary
+        const rocArgs = [rocBinaryPath];
+
+        const inputs = {
+            "server-url": core.getInput("server_url", { required: true }),
+            "api-key": core.getInput("api_key", { required: true }),
+            "project-name": core.getInput("project_name", { required: true }),
+            pcap: core.getInput("pcap"),
+            watch: watchDir,
+            patterns: core.getInput("patterns"),
+            "network-config": core.getInput("network_config"),
+            interface: core.getInput("interface"),
+            "ssl-lib": core.getInput("ssl_lib"),
+            "ssl-version": core.getInput("ssl_version"),
+            "pksize-lim": core.getInput("pksize_lim"),
+            "rotation-interval": core.getInput("rotation_interval"),
+            "ecap-output-folder": core.getInput("ecap_output_folder"),
+            source: core.getInput("source"),
+            "splunk-url": core.getInput("splunk_url"),
+            "splunk-token": core.getInput("splunk_token"),
+            "es-url": core.getInput("es_url"),
+            "es-index": core.getInput("es_index"),
+            "es-user": core.getInput("es_user"),
+            "es-pass": core.getInput("es_pass"),
+            config: core.getInput("config"),
+        };
+
+        for (const [key, value] of Object.entries(inputs)) {
+            if (value) {
+                rocArgs.push(`--${key}`, value);
+            }
+        }
+
+        if (core.getInput("debug") === "true") {
+            rocArgs.push("--debug");
+        }
 
         core.info(`Running command: sudo ${rocArgs.join(" ")}`);
 
