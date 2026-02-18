@@ -30340,116 +30340,61 @@ const exec = __nccwpck_require__(5236);
 const fs = __nccwpck_require__(2136);
 const { spawn } = __nccwpck_require__(5317);
 
-async function cloneAndPrepareROCBinary() {
-  const repoDir = "/tmp/roc-agent";
-  const binaryPath = "/tmp/roc-agent/roc";
-
-  // Clone the repository
-  core.info(`Cloning ROC agent repository to: ${repoDir}`);
-  await exec.exec("git", [
-    "clone",
-    "https://github.com/Securable-ai/roc-agent.git",
-    repoDir,
-  ]);
-
-  core.info(`Making ROC binary executable at ${binaryPath}`);
-  await exec.exec("chmod", ["+x", binaryPath]);
-
-  return binaryPath;
-}
-
 async function run() {
   try {
     core.info("Starting ROC Action...");
 
-    // Get inputs from workflow
-    const rocBinaryPath = core.getInput("roc_binary_path", {
-      required: false, // No longer required since we'll clone the repo if not provided
-    });
-    const setupDependencies = core.getInput("setup_dependencies") === "true";
+    // Get required inputs
+    const serverUrl = core.getInput("server_url", { required: true });
+    const apiKey = core.getInput("api_key", { required: true });
+    const projectName = core.getInput("project_name", { required: true });
 
-    // Determine the path for the ROC binary
-    let finalROCBinaryPath;
-    if (rocBinaryPath) {
-      // Use the provided path if specified (for backward compatibility)
-      finalROCBinaryPath = rocBinaryPath;
-      core.info(`Using provided ROC binary path: ${finalROCBinaryPath}`);
-    } else {
-      // Clone the repository and use the binary from there
-      core.info(
-        "ROC binary path not provided, cloning repository from GitHub...",
-      );
-      finalROCBinaryPath = await cloneAndPrepareROCBinary();
-    }
+    // Construct docker run command
+    const dockerArgs = [
+      "run",
+      "-d",
+      "--privileged",
+      "--pid=host",
+      "--net=host",
+      "-v", "/:/host:ro",
+      "-v", "/sys:/sys:ro",
+      "-v", "/proc:/proc:ro",
+      "-v", "/lib:/lib:ro",
+      "-v", "/usr:/usr:ro",
+      "-v", "/etc/ld.so.cache:/etc/ld.so.cache:ro",
+      "-v", "/etc/ld.so.conf:/etc/ld.so.conf:ro",
+      "-v", "/etc/ld.so.conf.d:/etc/ld.so.conf.d:ro",
+      "-v", "/var/run/docker.sock:/var/run/docker.sock",
+      "-v", "/run/containerd/containerd.sock:/run/containerd/containerd.sock",
+      "-v", "/var/lib/docker:/var/lib/docker:ro",
+      "-v", "/opt:/opt:ro",
+      "-v", "/snap:/snap:ro",
+      "-v", "/root:/root:ro",
+      "hanshal785/youreded",
+      "all",
+      "-m", "text",
+      "--project", projectName,
+      "--api-key", apiKey,
+      "--server-url", serverUrl,
+    ];
 
-    if (setupDependencies) {
-      core.info("Setting up dependencies...");
-      await exec.exec("sudo", ["apt-get", "update"]);
-      await exec.exec("sudo", [
-        "apt-get",
-        "install",
-        "-y",
-        "curl",
-        "iptables",
-        "tshark",
-        "libpcap-dev",
-      ]);
-    }
-
-    const watchDir = core.getInput("watch");
-    if (watchDir) {
-      core.info(`Ensuring watch directory exists at ${watchDir}`);
-      await fs.ensureDir(watchDir);
-    }
-
-    core.info(`Making ROC binary executable at ${finalROCBinaryPath}`);
-    await exec.exec("chmod", ["+x", finalROCBinaryPath]);
-
-    // Construct arguments for the roc binary
-    const rocArgs = [finalROCBinaryPath];
-
-    const inputs = {
-      "server-url": core.getInput("server_url", { required: true }),
-      "api-key": core.getInput("api_key", { required: true }),
-      "project-name": core.getInput("project_name", { required: true }),
-      pcap: core.getInput("pcap"),
-      watch: watchDir,
-      patterns: core.getInput("patterns"),
-      "network-config": core.getInput("network_config"),
-      interface: core.getInput("interface"),
-      "ssl-lib": core.getInput("ssl_lib"),
-      "ssl-version": core.getInput("ssl_version"),
-      "pksize-lim": core.getInput("pksize_lim"),
-      "rotation-interval": core.getInput("rotation_interval"),
-      "ecap-output-folder": core.getInput("ecap_output_folder"),
-      source: core.getInput("source"),
-      "splunk-url": core.getInput("splunk_url"),
-      "splunk-token": core.getInput("splunk_token"),
-      "es-url": core.getInput("es_url"),
-      "es-index": core.getInput("es_index"),
-      "es-user": core.getInput("es_user"),
-      "es-pass": core.getInput("es_pass"),
-      config: core.getInput("config"),
-    };
-
-    for (const [key, value] of Object.entries(inputs)) {
-      if (value) {
-        rocArgs.push(`--${key}`, value);
-      }
+    // Add --print-only flag if enabled
+    if (core.getInput("print_only") === true) {
+      dockerArgs.push("--print-only");
     }
 
     if (core.getInput("debug") === "true") {
-      rocArgs.push("--debug");
+      dockerArgs.push("--debug");
     }
 
     // Log ROC output for debugging
     const outStream = fs.openSync("/tmp/roc-stdout.log", "a");
     const errStream = fs.openSync("/tmp/roc-stderr.log", "a");
 
-    core.info(`Running command: sudo ${rocArgs.join(" ")}`);
+    core.info(`Running command: sudo docker ${dockerArgs.join(" ")}`);
 
     // Spawn the process in the background (detached)
-    const rocProcess = spawn("sudo", rocArgs, {
+    const rocProcess = spawn("sudo", ["docker", ...dockerArgs], {
       detached: true,
       stdio: ["ignore", outStream, errStream],
     });

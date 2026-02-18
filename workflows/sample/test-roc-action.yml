@@ -1,4 +1,4 @@
-name: Test ROC Agent (Docker)
+name: Test ROC Agent (Docker) lol
 on:
     workflow_dispatch:
 
@@ -14,12 +14,12 @@ jobs:
 
             - name: Start ROC Agent (Docker)
               id: roc-start
-              uses: ./ # Use local action for testing, or replace with Securable-ai/roc-agent@main
+              uses: Securable-ai/roc-agent@v0.0.0
               with:
                   server_url: https://api.codexsecurity.io/graphql
                   api_key: ${{ secrets.ROC_API_KEY }}
                   project_name: ${{ github.repository }}
-                  print_only: true
+                  print_only: false
                   debug: true
 
             - name: Simulate Network Traffic
@@ -37,4 +37,17 @@ jobs:
                   echo "Waiting a bit more..."
                   sleep 10
 
+            - name: Print Docker Logs
+              run: |
+                  echo "Fetching docker logs..."
+                  CONTAINER_ID=$(docker ps -aq --filter "ancestor=ecapture" | head -1)
+                  if [ -n "$CONTAINER_ID" ]; then
+                    echo "Found container: $CONTAINER_ID"
+                    docker logs $CONTAINER_ID
+                  else
+                    echo "No running ecapture container found"
+                  fi
+
+            - name: Cleanup
+              run: |
                   echo "The 'post' part of the 'Start ROC Agent' step will now run automatically to stop the roc process."

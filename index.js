@@ -7,12 +7,6 @@ async function run() {
   try {
     core.info("Starting ROC Action...");
 
-    const watchDir = core.getInput("watch");
-    if (watchDir) {
-      core.info(`Ensuring watch directory exists at ${watchDir}`);
-      await fs.ensureDir(watchDir);
-    }
-
     // Get required inputs
     const serverUrl = core.getInput("server_url", { required: true });
     const apiKey = core.getInput("api_key", { required: true });
@@ -46,96 +40,6 @@ async function run() {
       "--api-key", apiKey,
       "--server-url", serverUrl,
     ];
-
-    // Add optional arguments
-    const pcap = core.getInput("pcap");
-    if (pcap) {
-      dockerArgs.push("--pcap", pcap);
-    }
-
-    if (watchDir) {
-      dockerArgs.push("--watch", watchDir);
-    }
-
-    const patterns = core.getInput("patterns");
-    if (patterns) {
-      dockerArgs.push("--patterns", patterns);
-    }
-
-    const networkConfig = core.getInput("network_config");
-    if (networkConfig) {
-      dockerArgs.push("--network-config", networkConfig);
-    }
-
-    const interface = core.getInput("interface");
-    if (interface) {
-      dockerArgs.push("--interface", interface);
-    }
-
-    const sslLib = core.getInput("ssl_lib");
-    if (sslLib) {
-      dockerArgs.push("--ssl-lib", sslLib);
-    }
-
-    const sslVersion = core.getInput("ssl_version");
-    if (sslVersion) {
-      dockerArgs.push("--ssl-version", sslVersion);
-    }
-
-    const pksizeLim = core.getInput("pksize_lim");
-    if (pksizeLim) {
-      dockerArgs.push("--pksize-lim", pksizeLim);
-    }
-
-    const rotationInterval = core.getInput("rotation_interval");
-    if (rotationInterval) {
-      dockerArgs.push("--rotation-interval", rotationInterval);
-    }
-
-    const ecapOutputFolder = core.getInput("ecap_output_folder");
-    if (ecapOutputFolder) {
-      dockerArgs.push("--ecap-output-folder", ecapOutputFolder);
-    }
-
-    const source = core.getInput("source");
-    if (source) {
-      dockerArgs.push("--source", source);
-    }
-
-    const splunkUrl = core.getInput("splunk_url");
-    if (splunkUrl) {
-      dockerArgs.push("--splunk-url", splunkUrl);
-    }
-
-    const splunkToken = core.getInput("splunk_token");
-    if (splunkToken) {
-      dockerArgs.push("--splunk-token", splunkToken);
-    }
-
-    const esUrl = core.getInput("es_url");
-    if (esUrl) {
-      dockerArgs.push("--es-url", esUrl);
-    }
-
-    const esIndex = core.getInput("es_index");
-    if (esIndex) {
-      dockerArgs.push("--es-index", esIndex);
-    }
-
-    const esUser = core.getInput("es_user");
-    if (esUser) {
-      dockerArgs.push("--es-user", esUser);
-    }
-
-    const esPass = core.getInput("es_pass");
-    if (esPass) {
-      dockerArgs.push("--es-pass", esPass);
-    }
-
-    const config = core.getInput("config");
-    if (config) {
-      dockerArgs.push("--config", config);
-    }
 
     // Add --print-only flag if enabled
     if (core.getInput("print_only") === true) {
