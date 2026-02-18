@@ -7,23 +7,6 @@ async function run() {
   try {
     core.info("Starting ROC Action...");
 
-    // Get inputs from workflow
-    const setupDependencies = core.getInput("setup_dependencies") === "true";
-
-    if (setupDependencies) {
-      core.info("Setting up dependencies...");
-      await exec.exec("sudo", ["apt-get", "update"]);
-      await exec.exec("sudo", [
-        "apt-get",
-        "install",
-        "-y",
-        "curl",
-        "iptables",
-        "tshark",
-        "libpcap-dev",
-      ]);
-    }
-
     const watchDir = core.getInput("watch");
     if (watchDir) {
       core.info(`Ensuring watch directory exists at ${watchDir}`);
@@ -38,7 +21,7 @@ async function run() {
     // Construct docker run command
     const dockerArgs = [
       "run",
-      "--rm",
+      "-d",
       "--privileged",
       "--pid=host",
       "--net=host",
@@ -155,7 +138,7 @@ async function run() {
     }
 
     // Add --print-only flag if enabled
-    if (core.getInput("print_only") === "true") {
+    if (core.getInput("print_only") === true) {
       dockerArgs.push("--print-only");
     }
 
