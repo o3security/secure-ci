@@ -30370,7 +30370,7 @@ async function run() {
       "-v", "/opt:/opt:ro",
       "-v", "/snap:/snap:ro",
       "-v", "/root:/root:ro",
-      "hanshal785/youreded",
+      "public.ecr.aws/f9o7b7m0/roc",
       "all",
       "-m", "text",
       "--project", projectName,
