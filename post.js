@@ -73,7 +73,7 @@ async function readFIMEvents() {
 
 async function uploadFIMEvents(events, apiKey, serverUrl) {
   if (!apiKey || events.length === 0) return;
-  const base = serverUrl || "https://api.codexsecurity.io";
+  const base = (serverUrl || "https://api.codexsecurity.io").replace(/\/graphql\/?$/, '');
   try {
     await axios.post(`${base}/api/v1/roc/fim/events`, {
       repo: process.env.GITHUB_REPOSITORY || "",
