@@ -265,12 +265,14 @@ async function runIngest(apiKey, serverUrl) {
 
     core.info(`[Baseline] ${egressRaw.length} egress connections, ${fimRaw.length} FIM events to process`);
 
-    // Deduplicate by domain:port — eBPF fires multiple events per connection
+    // Deduplicate by domain:port:comm — same endpoint from different processes
+    // (e.g. npm + curl both hitting registry.npmjs.org) logs as separate supply-chain events.
     const seen = new Set();
     const egressDeduped = egressRaw.filter(e => {
         const domain = (e.domain || e.host || e.ip || 'unknown').toLowerCase();
         const port = e.port || 443;
-        const key = `${domain}:${port}`;
+        const comm = e.comm || '';
+        const key = `${domain}:${port}:${comm}`;
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
