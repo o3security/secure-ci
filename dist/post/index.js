@@ -19,11 +19,11 @@
 //   - FIM source file during install step → high
 
 const core = __nccwpck_require__(7484);
-const cache = __nccwpck_require__(2167);
 const fs = __nccwpck_require__(2136);
 const dns = (__nccwpck_require__(2250).promises);
 const net = __nccwpck_require__(9278);
 const { default: axios } = __nccwpck_require__(7269);
+const path = __nccwpck_require__(6928);
 
 const EGRESS_LOG_PATH = '/tmp/roc-egress-log.jsonl';
 const FIM_LOG_PATH = '/tmp/roc-fim-events.jsonl';
@@ -200,26 +200,32 @@ async function readJSONL(path) {
     } catch { return []; }
 }
 
-// ─── Cache fallback (when no api_key) ────────────────────────────────────────
+// ─── File-based cache (replaces @actions/cache which can't be bundled by ncc)
+// On GitHub-hosted runners, RUNNER_TOOL_CACHE is /opt/hostedtoolcache — not
+// persisted across runs. On self-hosted runners it IS persistent.
+// For GitHub-hosted: the backend (api_key path) is the primary persistence;
+// cache-only mode gives a single-run view (no cross-run baseline without api_key).
 
-function baselineCacheKey() {
-    const job = process.env.GITHUB_JOB || 'default';
-    const ref = (process.env.GITHUB_REF_NAME || 'main').replace(/[^a-zA-Z0-9_-]/g, '-');
-    return `roc-baseline-${job}-${ref}`;
+function cacheFilePath() {
+    const job = (process.env.GITHUB_JOB || 'default').replace(/[^a-zA-Z0-9._-]/g, '-');
+    const ref = (process.env.GITHUB_REF_NAME || 'main').replace(/[^a-zA-Z0-9._-]/g, '-');
+    const repo = (process.env.GITHUB_REPOSITORY || 'unknown').replace(/[^a-zA-Z0-9._-]/g, '-');
+    // Prefer a persistent directory; fall back to /tmp (ephemeral but safe)
+    const base = process.env.RUNNER_TOOL_CACHE || '/tmp';
+    return path.join(base, `roc-baseline-${repo}-${job}-${ref}.json`);
 }
 
 async function loadFromCache() {
     try {
-        const hit = await cache.restoreCache([BASELINE_CACHE_PATH], baselineCacheKey());
-        if (!hit) return null;
-        return await fs.readJson(BASELINE_CACHE_PATH);
-    } catch { return null; }
+        const fp = cacheFilePath();
+        if (await fs.pathExists(fp)) return await fs.readJson(fp);
+    } catch { /* ignore */ }
+    return null;
 }
 
 async function saveToCache(data) {
     try {
-        await fs.writeJson(BASELINE_CACHE_PATH, data, { spaces: 2 });
-        await cache.saveCache([BASELINE_CACHE_PATH], `${baselineCacheKey()}-${Date.now()}`);
+        await fs.outputJson(cacheFilePath(), data, { spaces: 2 });
     } catch (e) { core.warning(`[Baseline] Cache save failed: ${e.message}`); }
 }
 
@@ -32170,14 +32176,6 @@ exports.fromPromise = function (fn) {
     }
   }, 'name', { value: fn.name })
 }
-
-
-/***/ }),
-
-/***/ 2167:
-/***/ ((module) => {
-
-module.exports = eval("require")("@actions/cache");
 
 
 /***/ }),
