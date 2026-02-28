@@ -143,18 +143,42 @@ async function run() {
     core.setOutput("roc_pid", rocProcess.pid.toString());
 
     // ── Health check ──────────────────────────────────────────────────────
-    await sleep(3000);
+    // Wait longer to account for image pull time on first run
+    await sleep(8000);
     try {
-      const cid = execSync(
+      // Check running first, then exited (container may have crashed immediately)
+      let cid = execSync(
         `sudo docker ps --filter "ancestor=${dockerImage}" --filter "status=running" --format "{{.ID}}" | head -1`,
         { encoding: "utf8" }
       ).trim();
+
       if (!cid) {
-        const stderr = await fs.readFile("/tmp/roc-stderr.log", "utf8").catch(() => "(no output)");
-        core.warning(`ROC container may not be running. stderr:\n${stderr}`);
-      } else {
-        core.info(`✅ ROC container running (ID: ${cid})`);
+        // Grab it even if exited — we still want containerId for logs
+        cid = execSync(
+          `sudo docker ps -a --filter "ancestor=${dockerImage}" --format "{{.ID}}" | head -1`,
+          { encoding: "utf8" }
+        ).trim();
+      }
+
+      if (cid) {
         core.saveState("containerId", cid);
+        // Check actual status
+        const status = execSync(
+          `sudo docker inspect --format='{{.State.Status}} (exit={{.State.ExitCode}})' ${cid} 2>/dev/null`,
+          { encoding: "utf8" }
+        ).trim();
+        if (status.includes("running")) {
+          core.info(`✅ ROC container running (ID: ${cid})`);
+        } else {
+          core.warning(`⚠️ ROC container exited (${status}) — printing docker logs:`);
+          try {
+            const dkLogs = execSync(`sudo docker logs ${cid} 2>&1`, { encoding: "utf8" });
+            core.warning(dkLogs || "(no container output)");
+          } catch (_) { }
+        }
+      } else {
+        const stderr = await fs.readFile("/tmp/roc-stderr.log", "utf8").catch(() => "(no output)");
+        core.warning(`ROC container not found. stderr:\n${stderr}`);
       }
     } catch (e) {
       core.warning(`Could not verify container status: ${e.message}`);

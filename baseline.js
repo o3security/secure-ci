@@ -315,9 +315,11 @@ async function runIngest(apiKey, serverUrl) {
             phase: result.phase,
             deviations: result.deviations,
             high_severity_deviations: highCritical,
+            newDestinations: highCritical.map(d => d.key || d),   // ← was missing, crashed post.js
             run_count: result.run_count,
             egressClassified,
             fimClassified,
+            firstRun: result.run_count === 1,
             storedIn: 'backend+cache',
         };
     } catch (e) {

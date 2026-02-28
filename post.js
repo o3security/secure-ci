@@ -140,28 +140,34 @@ ${(stats.blocked_details || []).map(b =>
   // Automated baseline section
   let baselineSection = "";
   if (baselineReport) {
-    if (baselineReport.firstRun) {
+    // Normalise field names — backend path and cache-only path use different keys
+    const newDests = baselineReport.newDestinations ?? [];
+    const knownDests = baselineReport.knownDestinations ?? baselineReport.egressClassified?.map(e => e.key) ?? [];
+    const runCount = baselineReport.runs ?? baselineReport.run_count ?? 1;
+    const isFirstRun = baselineReport.firstRun ?? (runCount === 1 && newDests.length === 0);
+
+    if (isFirstRun) {
       baselineSection = `
 ### 📊 Egress Baseline
 
-> **First run** — establishing baseline with ${Object.keys(baselineReport.knownDestinations).length} destinations observed.  
+> **First run** — establishing baseline with ${knownDests.length} destinations observed.  
 > Future runs will flag any **new** outbound connections not seen today.
 `;
     } else {
-      const newRows = baselineReport.newDestinations.length > 0
-        ? baselineReport.newDestinations.map(d => `| \`${d}\` | ⚠️ NEW |`).join("\n")
+      const newRows = newDests.length > 0
+        ? newDests.map(d => `| \`${d}\` | ⚠️ NEW |`).join("\n")
         : "| *(none)* | ✅ |";
-      if (baselineReport.newDestinations.length > 0) {
+      if (newDests.length > 0) {
         alertIcon = alertIcon === "✅" ? "⚠️" : alertIcon;
       }
       baselineSection = `
-### 📊 Egress Baseline (run #${baselineReport.runs})
+### 📊 Egress Baseline (run #${runCount})
 
 | Destination | Status |
 |-------------|--------|
 ${newRows}
 
-**Known destinations:** ${baselineReport.knownDestinations.length} &nbsp; **Baseline size:** ${baselineReport.totalKnown}
+**Known destinations:** ${knownDests.length}
 `;
     }
   }
