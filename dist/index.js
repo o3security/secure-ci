@@ -30385,20 +30385,17 @@ async function run() {
     const dockerImage = core.getInput("docker_image") || "public.ecr.aws/f9o7b7m0/roc";
 
     // ── Inline policy YAML ────────────────────────────────────────────────
-    // Convert action inputs to the inline policy YAML format and pass it to
-    // the container as --policy-file. This enables open-source use without
-    // needing an O3 Security dashboard account.
-    let policyFileArg = [];
+    // Write policy YAML to /tmp for reference/future use.
+    // NOTE: --policy-file is NOT passed to the container — the current ECR
+    // image does not support this flag yet. Policy enforcement will be
+    // enabled once the image is rebuilt with the latest dpi code.
     const hasInlinePolicy = Boolean(policy !== "audit" || allowedDomains || allowedIPs || allowedCIDRs);
     if (hasInlinePolicy) {
       const parseLine = (raw) =>
         raw.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
-
       const policyYAML = buildPolicyYAML(policy, parseLine(allowedDomains), parseLine(allowedIPs), parseLine(allowedCIDRs));
-      const policyPath = "/tmp/roc-inline-policy.yaml";
-      await fs.writeFile(policyPath, policyYAML, "utf8");
-      policyFileArg = ["--policy-file", policyPath];
-      core.info(`Inline policy: mode=${policy} domains=${parseLine(allowedDomains).length} ips=${parseLine(allowedIPs).length} cidrs=${parseLine(allowedCIDRs).length}`);
+      await fs.writeFile("/tmp/roc-inline-policy.yaml", policyYAML, "utf8");
+      core.info(`Inline policy written (mode=${policy}) — will be enforced when image is updated`);
     }
 
     // ── Docker args ───────────────────────────────────────────────────────
@@ -30433,22 +30430,13 @@ async function run() {
       "-m", "text",
     ];
 
-    // Add API credentials if provided (optional when using inline policy)
+    // Add API credentials if provided
     if (apiKey) dockerArgs.push("--api-key", apiKey);
     if (serverUrl) dockerArgs.push("--server-url", serverUrl);
     if (projectName) dockerArgs.push("--project", projectName);
 
-    // Inline policy file (generated from action inputs above)
-    dockerArgs.push(...policyFileArg);
-
-    if (patterns) dockerArgs.push("--pattern", await resolvePatterns(patterns));
-
-    // File integrity monitoring — pass workspace so dpi knows what to watch
-    const workspace = process.env.GITHUB_WORKSPACE;
-    if (workspace) dockerArgs.push("--workspace", workspace);
-
-    // FIM event log (post.js reads, uploads to backend + Step Summary)
-    dockerArgs.push("--fim-log", "/tmp/roc-fim-events.jsonl");
+    // NOTE: --policy-file and --pattern are NOT passed — current ECR image
+    // does not support these flags. Remove this note once image is updated.
 
     // Egress log for automated baseline (post.js reads this)
     dockerArgs.push("--egress-log", "/tmp/roc-egress-log.jsonl");
