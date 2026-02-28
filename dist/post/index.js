@@ -271,8 +271,20 @@ async function runIngest(apiKey, serverUrl) {
 
     core.info(`[Baseline] ${egressRaw.length} egress connections, ${fimRaw.length} FIM events to process`);
 
-    // Classify egress — run DNS checks in parallel (capped at 20 to avoid slowdown)
-    const egressToCheck = egressRaw.slice(0, 100);
+    // Deduplicate by domain:port — eBPF fires multiple events per connection
+    const seen = new Set();
+    const egressDeduped = egressRaw.filter(e => {
+        const domain = (e.domain || e.host || e.ip || 'unknown').toLowerCase();
+        const port = e.port || 443;
+        const key = `${domain}:${port}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+    core.info(`[Baseline] ${egressDeduped.length} unique egress destinations after dedup`);
+
+    // Classify egress — run DNS checks in parallel (capped at 100)
+    const egressToCheck = egressDeduped.slice(0, 100);
     const egressClassified = await Promise.all(
         egressToCheck.map(async (e) => {
             const domain = (e.domain || e.host || e.ip || 'unknown').toLowerCase();
