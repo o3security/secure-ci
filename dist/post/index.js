@@ -291,9 +291,20 @@ async function runIngest(apiKey, serverUrl) {
         egressToCheck.map(async (e) => {
             const domain = (e.domain || e.host || e.ip || 'unknown').toLowerCase();
             const port = e.port || 443;
-            const key = `${domain}:${port}`;
+            const comm = e.comm || '';
+            // Key includes comm so UI can show "npm → registry.npmjs.org" separately from "curl → registry.npmjs.org"
+            const key = comm ? `${domain}:${port}:${comm}` : `${domain}:${port}`;
             const { severity, severity_reason, ...extra } = await classifyEgress(e);
-            return { key, severity, severity_reason, tls_cert_not_before: e.tls_cert_not_before || null, ...extra };
+            return {
+                key, severity, severity_reason,
+                tls_cert_not_before: e.tls_cert_not_before || null,
+                // Supply chain source fields — displayed in UI Captures tab + Step Summary
+                comm,
+                cmdline: e.cmdline || '',
+                parent_comm: e.parent_comm || '',
+                source: e.source || 'openssl',
+                ...extra,
+            };
         })
     );
 
@@ -40020,6 +40031,31 @@ ${rows}${more}
 `;
   }
 
+  // Captured connections section — shows supply chain process context
+  let capturesSection = "";
+  const captureEvents = stats?.egress_events || [];
+  if (captureEvents.length > 0) {
+    const rows = captureEvents.slice(0, 30).map(e => {
+      const dest = `${e.domain || e.ip}:${e.port}`;
+      const proc = e.comm ? `\`${e.comm}\`` : "–";
+      const cmd = e.cmdline ? `\`${e.cmdline.slice(0, 60)}\`` : "–";
+      const par = e.parent_comm ? `\`${e.parent_comm}\`` : "–";
+      const src = e.source === "tcpmonitor" ? "TCP" : "TLS/SSL";
+      const sec = e.secrets ? "🚨" : "";
+      return `| \`${dest}\` | ${proc} | ${cmd} | ${par} | ${src} ${sec}|`;
+    }).join("\n");
+    const more = captureEvents.length > 30 ? `\n> _…and ${captureEvents.length - 30} more connections_` : "";
+    capturesSection = `
+### 🔗 Captured Connections (${captureEvents.length})
+
+| Destination | Process | Command | Parent | Source |
+|-------------|---------|---------|--------|--------|
+${rows}${more}
+
+> _Supply chain context: **Process** shows which binary made the request, **Parent** shows what spawned it (e.g. \`npm\`→\`bash\`→\`curl\`→evil.io)_
+`;
+  }
+
   const tlsCount = stats ? (stats.tls_connections || 0) : "–";
   const secretsFound = stats ? (stats.secrets_found || 0) : "–";
   const uniqueDests = stats ? (stats.unique_destinations || 0) : "–";
@@ -40045,6 +40081,7 @@ ${rows}${more}
 ${secretSection}
 ${egressSection}
 ${fimSection}
+${capturesSection}
 ${baselineSection}
 ---
 🛡️ Powered by [O3 Security ROC Agent](https://github.com/o3security/roc-agent)  

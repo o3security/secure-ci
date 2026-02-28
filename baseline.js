@@ -285,9 +285,20 @@ async function runIngest(apiKey, serverUrl) {
         egressToCheck.map(async (e) => {
             const domain = (e.domain || e.host || e.ip || 'unknown').toLowerCase();
             const port = e.port || 443;
-            const key = `${domain}:${port}`;
+            const comm = e.comm || '';
+            // Key includes comm so UI can show "npm → registry.npmjs.org" separately from "curl → registry.npmjs.org"
+            const key = comm ? `${domain}:${port}:${comm}` : `${domain}:${port}`;
             const { severity, severity_reason, ...extra } = await classifyEgress(e);
-            return { key, severity, severity_reason, tls_cert_not_before: e.tls_cert_not_before || null, ...extra };
+            return {
+                key, severity, severity_reason,
+                tls_cert_not_before: e.tls_cert_not_before || null,
+                // Supply chain source fields — displayed in UI Captures tab + Step Summary
+                comm,
+                cmdline: e.cmdline || '',
+                parent_comm: e.parent_comm || '',
+                source: e.source || 'openssl',
+                ...extra,
+            };
         })
     );
 

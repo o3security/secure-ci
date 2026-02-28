@@ -226,6 +226,31 @@ ${rows}${more}
 `;
   }
 
+  // Captured connections section — shows supply chain process context
+  let capturesSection = "";
+  const captureEvents = stats?.egress_events || [];
+  if (captureEvents.length > 0) {
+    const rows = captureEvents.slice(0, 30).map(e => {
+      const dest = `${e.domain || e.ip}:${e.port}`;
+      const proc = e.comm ? `\`${e.comm}\`` : "–";
+      const cmd = e.cmdline ? `\`${e.cmdline.slice(0, 60)}\`` : "–";
+      const par = e.parent_comm ? `\`${e.parent_comm}\`` : "–";
+      const src = e.source === "tcpmonitor" ? "TCP" : "TLS/SSL";
+      const sec = e.secrets ? "🚨" : "";
+      return `| \`${dest}\` | ${proc} | ${cmd} | ${par} | ${src} ${sec}|`;
+    }).join("\n");
+    const more = captureEvents.length > 30 ? `\n> _…and ${captureEvents.length - 30} more connections_` : "";
+    capturesSection = `
+### 🔗 Captured Connections (${captureEvents.length})
+
+| Destination | Process | Command | Parent | Source |
+|-------------|---------|---------|--------|--------|
+${rows}${more}
+
+> _Supply chain context: **Process** shows which binary made the request, **Parent** shows what spawned it (e.g. \`npm\`→\`bash\`→\`curl\`→evil.io)_
+`;
+  }
+
   const tlsCount = stats ? (stats.tls_connections || 0) : "–";
   const secretsFound = stats ? (stats.secrets_found || 0) : "–";
   const uniqueDests = stats ? (stats.unique_destinations || 0) : "–";
@@ -251,6 +276,7 @@ ${rows}${more}
 ${secretSection}
 ${egressSection}
 ${fimSection}
+${capturesSection}
 ${baselineSection}
 ---
 🛡️ Powered by [O3 Security ROC Agent](https://github.com/o3security/roc-agent)  
