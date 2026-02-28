@@ -30336,23 +30336,74 @@ module.exports = parseParams
 /************************************************************************/
 var __webpack_exports__ = {};
 const core = __nccwpck_require__(7484);
-const exec = __nccwpck_require__(5236);
 const fs = __nccwpck_require__(2136);
-const { spawn } = __nccwpck_require__(5317);
+const { spawn, execSync } = __nccwpck_require__(5317);
 
 async function run() {
   try {
-    core.info("Starting ROC Action...");
+    core.info("Starting O3 Security ROC Agent...");
 
-    // Get required inputs
-    const serverUrl = core.getInput("server_url", { required: true });
-    const apiKey = core.getInput("api_key", { required: true });
-    const projectName = core.getInput("project_name", { required: true });
+    // Write CI/CD step context for per-step event tagging inside the container
+    const stepContext = {
+      step: process.env.GITHUB_ACTION || "",
+      job: process.env.GITHUB_JOB || "",
+      workflow: process.env.GITHUB_WORKFLOW || "",
+      run_id: process.env.GITHUB_RUN_ID || "",
+      run_number: process.env.GITHUB_RUN_NUMBER || "",
+      sha: process.env.GITHUB_SHA || "",
+      ref: process.env.GITHUB_REF || "",
+      actor: process.env.GITHUB_ACTOR || "",
+      repository: process.env.GITHUB_REPOSITORY || "",
+      runner_name: process.env.RUNNER_NAME || "",
+      runner_os: process.env.RUNNER_OS || "",
+      timestamp: Date.now(),
+    };
+    await fs.outputJson("/tmp/roc-step-context.json", stepContext);
+    core.info(`CI/CD context: repo=${stepContext.repository} job=${stepContext.job}`);
 
-    // Construct docker run command
+    // ── Inputs ────────────────────────────────────────────────────────────
+    const apiKey = core.getInput("api_key");
+    const serverUrl = core.getInput("server_url");
+    const projectName = core.getInput("project_name");
+    // Inline policy (open-source / no-dashboard mode)
+    const policy = core.getInput("policy") || "audit";
+    const allowedDomains = core.getInput("allowed_domains") || "";
+    const allowedIPs = core.getInput("allowed_ips") || "";
+    const allowedCIDRs = core.getInput("allowed_cidrs") || "";
+    // Secret scanning
+    const patterns = core.getInput("patterns");
+    // SIEM
+    const splunkUrl = core.getInput("splunk_url");
+    const splunkToken = core.getInput("splunk_token");
+    const esUrl = core.getInput("es_url");
+    const esIndex = core.getInput("es_index");
+    const esUser = core.getInput("es_user");
+    const esPass = core.getInput("es_pass");
+    // Mode
+    const printOnly = core.getInput("print_only") === "true";
+    const debug = core.getInput("debug") === "true";
+    const dockerImage = core.getInput("docker_image") || "public.ecr.aws/f9o7b7m0/roc";
+
+    // ── Inline policy YAML ────────────────────────────────────────────────
+    // Convert action inputs to the inline policy YAML format and pass it to
+    // the container as --policy-file. This enables open-source use without
+    // needing an O3 Security dashboard account.
+    let policyFileArg = [];
+    const hasInlinePolicy = Boolean(policy !== "audit" || allowedDomains || allowedIPs || allowedCIDRs);
+    if (hasInlinePolicy) {
+      const parseLine = (raw) =>
+        raw.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+
+      const policyYAML = buildPolicyYAML(policy, parseLine(allowedDomains), parseLine(allowedIPs), parseLine(allowedCIDRs));
+      const policyPath = "/tmp/roc-inline-policy.yaml";
+      await fs.writeFile(policyPath, policyYAML, "utf8");
+      policyFileArg = ["--policy-file", policyPath];
+      core.info(`Inline policy: mode=${policy} domains=${parseLine(allowedDomains).length} ips=${parseLine(allowedIPs).length} cidrs=${parseLine(allowedCIDRs).length}`);
+    }
+
+    // ── Docker args ───────────────────────────────────────────────────────
     const dockerArgs = [
-      "run",
-      "-d",
+      "run", "-d",
       "--privileged",
       "--pid=host",
       "--net=host",
@@ -30362,57 +30413,142 @@ async function run() {
       "-v", "/lib:/lib:ro",
       "-v", "/usr:/usr:ro",
       "-v", "/etc/ld.so.cache:/etc/ld.so.cache:ro",
-      "-v", "/etc/ld.so.conf:/etc/ld.so.conf:ro",
-      "-v", "/etc/ld.so.conf.d:/etc/ld.so.conf.d:ro",
       "-v", "/var/run/docker.sock:/var/run/docker.sock",
       "-v", "/run/containerd/containerd.sock:/run/containerd/containerd.sock",
       "-v", "/var/lib/docker:/var/lib/docker:ro",
       "-v", "/opt:/opt:ro",
       "-v", "/snap:/snap:ro",
       "-v", "/root:/root:ro",
-      "public.ecr.aws/f9o7b7m0/roc",
+      "-v", "/tmp:/tmp",          // shares /tmp/roc-step-context.json + policy YAML
+      // CI/CD env vars for event tagging
+      "-e", `GITHUB_REPOSITORY=${stepContext.repository}`,
+      "-e", `GITHUB_RUN_ID=${stepContext.run_id}`,
+      "-e", `GITHUB_JOB=${stepContext.job}`,
+      "-e", `GITHUB_WORKFLOW=${stepContext.workflow}`,
+      "-e", `GITHUB_SHA=${stepContext.sha}`,
+      "-e", `GITHUB_ACTOR=${stepContext.actor}`,
+      "-e", `RUNNER_NAME=${stepContext.runner_name}`,
+      dockerImage,
       "all",
       "-m", "text",
-      "--project", projectName,
-      "--api-key", apiKey,
-      "--server-url", serverUrl,
     ];
 
-    // Add --print-only flag if enabled
-    if (core.getInput("print_only") === true) {
-      dockerArgs.push("--print-only");
-    }
+    // Add API credentials if provided (optional when using inline policy)
+    if (apiKey) dockerArgs.push("--api-key", apiKey);
+    if (serverUrl) dockerArgs.push("--server-url", serverUrl);
+    if (projectName) dockerArgs.push("--project", projectName);
 
-    if (core.getInput("debug") === "true") {
-      dockerArgs.push("--debug");
-    }
+    // Inline policy file (generated from action inputs above)
+    dockerArgs.push(...policyFileArg);
 
-    // Log ROC output for debugging
+    if (patterns) dockerArgs.push("--pattern", await resolvePatterns(patterns));
+
+    // File integrity monitoring — pass workspace so dpi knows what to watch
+    const workspace = process.env.GITHUB_WORKSPACE;
+    if (workspace) dockerArgs.push("--workspace", workspace);
+
+    // FIM event log (post.js reads, uploads to backend + Step Summary)
+    dockerArgs.push("--fim-log", "/tmp/roc-fim-events.jsonl");
+
+    // Egress log for automated baseline (post.js reads this)
+    dockerArgs.push("--egress-log", "/tmp/roc-egress-log.jsonl");
+
+    if (splunkUrl) dockerArgs.push("--splunk-url", splunkUrl);
+    if (splunkToken) dockerArgs.push("--splunk-token", splunkToken);
+    if (esUrl) dockerArgs.push("--es-url", esUrl);
+    if (esIndex) dockerArgs.push("--es-index", esIndex);
+    if (esUser) dockerArgs.push("--es-user", esUser);
+    if (esPass) dockerArgs.push("--es-pass", esPass);
+    if (printOnly) dockerArgs.push("--print-only");
+    if (debug) dockerArgs.push("--debug");
+
+    // ── Spawn container ───────────────────────────────────────────────────
     const outStream = fs.openSync("/tmp/roc-stdout.log", "a");
     const errStream = fs.openSync("/tmp/roc-stderr.log", "a");
 
-    core.info(`Running command: sudo docker ${dockerArgs.join(" ")}`);
-
-    // Spawn the process in the background (detached)
+    core.info(`Starting ROC container (image: ${dockerImage}, egress: ${policy})`);
     const rocProcess = spawn("sudo", ["docker", ...dockerArgs], {
       detached: true,
       stdio: ["ignore", outStream, errStream],
     });
-
-    // The action's main script can exit, but the child process will continue running.
-    // The 'post' script will handle its termination.
     rocProcess.unref();
 
-    // Save the PID to state for the post-action script to use
-    core.saveState("rocPid", rocProcess.pid);
-    core.setOutput("roc_pid", rocProcess.pid);
-    core.info(
-      `ROC process started in the background with PID: ${rocProcess.pid}`,
-    );
+    core.saveState("rocPid", rocProcess.pid.toString());
+    core.saveState("dockerImage", dockerImage);
+    core.saveState("egressPolicy", policy);
+    core.setOutput("roc_pid", rocProcess.pid.toString());
+
+    // ── Health check ──────────────────────────────────────────────────────
+    await sleep(3000);
+    try {
+      const cid = execSync(
+        `sudo docker ps --filter "ancestor=${dockerImage}" --filter "status=running" --format "{{.ID}}" | head -1`,
+        { encoding: "utf8" }
+      ).trim();
+      if (!cid) {
+        const stderr = await fs.readFile("/tmp/roc-stderr.log", "utf8").catch(() => "(no output)");
+        core.warning(`ROC container may not be running. stderr:\n${stderr}`);
+      } else {
+        core.info(`✅ ROC container running (ID: ${cid})`);
+        core.saveState("containerId", cid);
+      }
+    } catch (e) {
+      core.warning(`Could not verify container status: ${e.message}`);
+    }
+
   } catch (error) {
-    core.setFailed(`Action failed with error: ${error.message}`);
+    core.setFailed(`ROC Agent failed to start: ${error.message}`);
   }
 }
+
+/**
+ * Resolves the `patterns` input to a file path the container can read.
+ * Accepts either:
+ *   1. A file path:          .github/roc-patterns.yaml
+ *   2. Inline YAML content:  - id: aws_key\n  regex: 'AKIA...'
+ *
+ * Inline content is detected by the presence of a newline or a leading '-'.
+ * It is normalised to the full patterns: [...] format and written to a temp file.
+ */
+async function resolvePatterns(input) {
+  const trimmed = input.trim();
+  const isInline = trimmed.includes("\n") || trimmed.startsWith("-") || trimmed.startsWith("patterns:");
+  if (!isInline) {
+    // It's a file path — pass through as-is
+    return input;
+  }
+
+  // Inline YAML — normalise to patterns: [...] if not already
+  let yaml = trimmed;
+  if (!yaml.startsWith("patterns:")) {
+    // Indent each line by 2 spaces and add the top-level key
+    yaml = "patterns:\n" + yaml.split("\n").map(l => "  " + l).join("\n");
+  }
+
+  const tmpPath = "/tmp/roc-inline-patterns.yaml";
+  await fs.writeFile(tmpPath, yaml + "\n", "utf8");
+  core.info(`Inline patterns written to ${tmpPath}`);
+  return tmpPath;
+}
+
+function buildPolicyYAML(policy, domains, ips, cidrs) {
+  const lines = [`policy: ${policy}`, "whitelist:"];
+  if (domains.length > 0) {
+    lines.push("  domains:");
+    domains.forEach(d => lines.push(`    - ${d}`));
+  }
+  if (ips.length > 0) {
+    lines.push("  ips:");
+    ips.forEach(ip => lines.push(`    - ${ip}`));
+  }
+  if (cidrs.length > 0) {
+    lines.push("  cidrs:");
+    cidrs.forEach(c => lines.push(`    - ${c}`));
+  }
+  return lines.join("\n") + "\n";
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 run();
 

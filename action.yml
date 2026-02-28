@@ -1,91 +1,106 @@
 name: "ROC Agent"
-description: "Run ROC binary in your GitHub Actions workflow"
-author: "SecurableAI"
+description: "O3 Security ROC Agent — Runtime security and deep packet inspection for GitHub Actions"
+author: "O3 Security"
 
 inputs:
-  server_url:
-    description: "License validation server URL (required for authentication)"
-    required: true
-    default: "https://api.codexsecurity.io/graphql"
+  # ── O3 Security dashboard (optional) ─────────────────────────────────────
+  # Leave blank to run in open-source mode with inline policy below.
   api_key:
-    description: "API key for authentication (required - keep secure)"
-    required: true
+    description: "API key for O3 Security authentication (store in GitHub Secrets)"
+    required: false
+    default: ""
+  server_url:
+    description: "O3 Security API URL"
+    required: false
+    default: "https://api.codexsecurity.io/graphql"
   project_name:
-    description: "Your github project name"
-    required: true
-  pcap:
-    description: "Single PCAP/PCAPNG file to analyze for secrets and network traffic"
+    description: "Project name for grouping results in the O3 Security dashboard"
     required: false
-  watch:
-    description: "Directory to monitor for new PCAP files (continuous processing mode)"
+    default: ""
+
+  # ── Inline policy (open-source / no-dashboard mode) ───────────────────────
+  # Configure egress policy without logging in to the O3 Security dashboard.
+  # The action converts these inputs to a policy YAML file internally.
+  policy:
+    description: |
+      Egress enforcement mode:
+        audit  — monitor and log all outbound connections (default, safe)
+        block  — drop TCP 80/443 connections not in the allowlist below
     required: false
+    default: "audit"
+  allowed_domains:
+    description: |
+      Allowed outbound domains when policy=block.
+      One per line, or comma-separated. Supports host:port (e.g. api.github.com:443)
+      and plain hostnames (allows both 80 and 443).
+    required: false
+    default: ""
+  allowed_ips:
+    description: |
+      Allowed outbound IPs when policy=block.
+      One per line, or comma-separated (e.g. 1.1.1.1).
+    required: false
+    default: ""
+  allowed_cidrs:
+    description: |
+      Allowed outbound IP ranges when policy=block.
+      One per line, or comma-separated CIDR notation (e.g. 10.0.0.0/8).
+    required: false
+    default: ""
+
+  # ── Secret detection ──────────────────────────────────────────────────────
   patterns:
-    description: "YAML file containing regex patterns for secret detection (optional)"
+    description: |
+      Secret scanning patterns. Accepts either:
+        1. A file path:   .github/roc-patterns.yaml
+        2. Inline YAML content (use | for multiline):
+             - id: aws_key
+               regex: 'AKIA[0-9A-Z]{16}'
+             - id: github_token
+               regex: 'ghp_[A-Za-z0-9]{36}'
     required: false
-  network_config:
-    description: "YAML file containing network include/exclude filtering rules"
-    required: false
-  interface:
-    description: "Network interface for live capture (auto-detected if not specified)"
-    required: false
-  ssl_lib:
-    description: "Custom SSL library path for TLS decryption (auto-detected by default)"
-    required: false
-  ssl_version:
-    description: "Specific SSL/TLS version to capture (auto-detected by default)"
-    required: false
-  pksize_lim:
-    description: "Minimum packet size threshold - only capture packets above this size"
-    required: false
-  rotation_interval:
-    description: "PCAP file rotation interval (e.g., 30s, 1m, 5m, 1h)"
-    required: false
-    default: "1m"
-  ecap_output_folder:
-    description: "Directory where PCAP files are stored"
-    required: false
-    default: "/tmp/roc-output"
-  source:
-    description: "Source identifier for tracking data origin"
-    required: false
-    default: "roc-sensor"
-  debug:
-    description: "Enable debug mode with verbose logging and local file output"
-    required: false
-    default: "false"
+
+  # ── SIEM integration (optional) ───────────────────────────────────────────
   splunk_url:
     description: "Splunk HEC URL for direct SIEM integration"
     required: false
   splunk_token:
-    description: "Splunk HEC token for authentication"
+    description: "Splunk HEC token (store in GitHub Secrets)"
     required: false
   es_url:
-    description: "Elasticsearch cluster URL for direct integration"
+    description: "Elasticsearch cluster URL"
     required: false
   es_index:
-    description: "Elasticsearch index name for storing analysis results"
+    description: "Elasticsearch index name"
     required: false
   es_user:
-    description: "Elasticsearch username for authentication"
+    description: "Elasticsearch username"
     required: false
   es_pass:
-    description: "Elasticsearch password for authentication"
+    description: "Elasticsearch password (store in GitHub Secrets)"
     required: false
-  config:
-    description: "Path to configuration file (YAML/JSON) for complex setups"
-    required: false
+
+  # ── Advanced ──────────────────────────────────────────────────────────────
   print_only:
-    description: "Print events to stdout only (no server upload)"
+    description: "Print captured events to stdout only — skip upload to O3 backend (useful for testing)"
     required: false
     default: "false"
-  roc_binary_path:
-    description: "Path to the ROC binary (if not provided, the binary will be cloned from the repository)"
+  debug:
+    description: "Enable verbose debug logging"
     required: false
-    default: ""
-  setup_dependencies:
-    description: "Install dependencies like tshark"
+    default: "false"
+  docker_image:
+    description: "Override the ROC Docker image (for air-gapped environments)"
+    required: false
+    default: "public.ecr.aws/f9o7b7m0/roc"
+  baseline_enabled:
+    description: "Enable automated egress baseline — flags new destinations not seen in previous runs (uses GitHub Actions Cache)"
     required: false
     default: "true"
+
+outputs:
+  roc_pid:
+    description: "PID of the background ROC monitor process"
 
 runs:
   using: "node20"

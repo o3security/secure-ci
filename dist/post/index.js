@@ -1,6 +1,247 @@
 /******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
+/***/ 9421:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+// baseline.js — Automated baseline management for ROC Agent
+//
+// Storage strategy (API-first, cache fallback):
+//   1. If api_key is set → load/save via backend API (persistent across machines/branches)
+//   2. Otherwise → GitHub Actions Cache (free, no account needed)
+//
+// The backend API stores baselines per {org, repo, job, branch} in MongoDB.
+// GitHub Cache key: roc-baseline-{GITHUB_JOB}-{GITHUB_REF_NAME}
+
+const core = __nccwpck_require__(7484);
+const cache = __nccwpck_require__(2167);
+const fs = __nccwpck_require__(2136);
+const axios = __nccwpck_require__(1473);
+
+const BASELINE_PATH = "/tmp/roc-baseline.json";
+const EGRESS_LOG_PATH = "/tmp/roc-egress-log.jsonl";
+
+// ─── Cache key helpers ────────────────────────────────────────────────────────
+
+function baselineCacheKey() {
+    const job = process.env.GITHUB_JOB || "default";
+    const ref = (process.env.GITHUB_REF_NAME || process.env.GITHUB_REF || "main")
+        .replace(/[^a-zA-Z0-9_-]/g, "-");
+    return `roc-baseline-${job}-${ref}`;
+}
+
+// ─── Backend API (persistent, cross-machine) ──────────────────────────────────
+
+/**
+ * Loads the baseline from the O3 Security backend API.
+ * Returns null if no baseline exists yet or on error.
+ */
+async function loadBaselineFromAPI(apiKey, serverUrl) {
+    const repo = process.env.GITHUB_REPOSITORY || "";
+    const job = process.env.GITHUB_JOB || "default";
+    const branch = process.env.GITHUB_REF_NAME || process.env.GITHUB_REF || "main";
+    const base = serverUrl || "https://app.o3security.io";
+
+    try {
+        const resp = await axios.get(`${base}/api/v1/roc/baseline`, {
+            params: { repo, job, branch },
+            headers: { Authorization: `apiKey ${apiKey}` },
+            timeout: 8000,
+        });
+        if (resp.data?.found) {
+            core.info(`[Baseline] Loaded from backend: run #${resp.data.runs}, ${resp.data.totalDestinations} known destinations`);
+            return resp.data;
+        }
+        core.info("[Baseline] No backend baseline yet — this is the first run");
+        return null;
+    } catch (e) {
+        core.warning(`[Baseline] Could not load from backend: ${e.message}`);
+        return null;
+    }
+}
+
+/**
+ * Saves the updated baseline to the O3 Security backend API.
+ */
+async function saveBaselineToAPI(apiKey, serverUrl, data) {
+    const repo = process.env.GITHUB_REPOSITORY || "";
+    const job = process.env.GITHUB_JOB || "default";
+    const branch = process.env.GITHUB_REF_NAME || process.env.GITHUB_REF || "main";
+    const base = serverUrl || "https://app.o3security.io";
+
+    try {
+        await axios.post(`${base}/api/v1/roc/baseline/upload`, {
+            repo, job, branch,
+            runs: data.runs,
+            baseline: data.baseline,
+        }, {
+            headers: { Authorization: `apiKey ${apiKey}`, "Content-Type": "application/json" },
+            timeout: 10000,
+        });
+        core.info(`[Baseline] Saved to backend: run #${data.runs}, ${Object.keys(data.baseline).length} destinations`);
+    } catch (e) {
+        core.warning(`[Baseline] Could not save to backend: ${e.message}`);
+    }
+}
+
+// ─── GitHub Actions Cache (fallback) ─────────────────────────────────────────
+
+async function loadBaselineFromCache() {
+    const key = baselineCacheKey();
+    try {
+        const hit = await cache.restoreCache([BASELINE_PATH], key);
+        if (!hit) {
+            core.info(`[Baseline] No cache baseline for key: ${key} (first run)`);
+            return null;
+        }
+        const data = await fs.readJson(BASELINE_PATH);
+        core.info(`[Baseline] Loaded from cache: run #${data.runs}, ${Object.keys(data.baseline).length} known destinations`);
+        return data;
+    } catch (e) {
+        core.warning(`[Baseline] Could not load from cache: ${e.message}`);
+        return null;
+    }
+}
+
+async function saveBaselineToCache(data) {
+    const key = baselineCacheKey();
+    try {
+        await fs.writeJson(BASELINE_PATH, data, { spaces: 2 });
+        const saveKey = `${key}-${process.env.GITHUB_RUN_ID || Date.now()}`;
+        await cache.saveCache([BASELINE_PATH], saveKey);
+        core.info(`[Baseline] Saved to cache: ${saveKey}`);
+    } catch (e) {
+        core.warning(`[Baseline] Could not save to cache: ${e.message}`);
+    }
+}
+
+// ─── Egress log reader ────────────────────────────────────────────────────────
+
+/**
+ * Reads /tmp/roc-egress-log.jsonl written by the dpi binary.
+ * Returns { "domain:port": count }
+ */
+async function readEgressLog() {
+    const connections = {};
+    try {
+        if (!(await fs.pathExists(EGRESS_LOG_PATH))) {
+            core.info("[Baseline] No egress log found");
+            return connections;
+        }
+        const content = await fs.readFile(EGRESS_LOG_PATH, "utf8");
+        for (const line of content.split("\n")) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+                const entry = JSON.parse(trimmed);
+                const key = `${entry.domain || entry.ip || "unknown"}:${entry.port || "443"}`;
+                connections[key] = (connections[key] || 0) + 1;
+            } catch { /* malformed line */ }
+        }
+        core.info(`[Baseline] ${Object.keys(connections).length} unique egress destinations observed`);
+    } catch (e) {
+        core.warning(`[Baseline] Error reading egress log: ${e.message}`);
+    }
+    return connections;
+}
+
+// ─── Diff + merge logic ───────────────────────────────────────────────────────
+
+/**
+ * Compares current run connections against historical baseline.
+ * Returns { newDestinations, knownDestinations, firstRun }
+ */
+function diffBaseline(currentConnections, baseline) {
+    if (!baseline || !baseline.baseline) {
+        return {
+            newDestinations: [],
+            knownDestinations: Object.keys(currentConnections),
+            firstRun: true,
+        };
+    }
+    const newDestinations = [];
+    const knownDestinations = [];
+    for (const dest of Object.keys(currentConnections)) {
+        if (baseline.baseline[dest]) {
+            knownDestinations.push(dest);
+        } else {
+            newDestinations.push(dest);
+        }
+    }
+    return { newDestinations, knownDestinations, firstRun: false };
+}
+
+/**
+ * Merges current connections into the baseline, incrementing run count.
+ */
+function mergeBaseline(existing, currentConnections) {
+    const runs = (existing?.runs || 0) + 1;
+    const merged = { ...(existing?.baseline || {}) };
+    for (const [dest, count] of Object.entries(currentConnections)) {
+        merged[dest] = (merged[dest] || 0) + count;
+    }
+    return {
+        job: process.env.GITHUB_JOB || "default",
+        branch: process.env.GITHUB_REF_NAME || "main",
+        runs,
+        updated_at: new Date().toISOString(),
+        baseline: merged,
+    };
+}
+
+// ─── Main entry point ─────────────────────────────────────────────────────────
+
+/**
+ * Full baseline lifecycle: load → read egress log → diff → merge → save.
+ * Uses backend API if apiKey is present; falls back to GitHub Actions Cache.
+ *
+ * @param {string} apiKey - O3 Security API key (optional)
+ * @param {string} serverUrl - O3 backend URL (optional)
+ * @returns {{ newDestinations, knownDestinations, firstRun, runs, totalKnown }}
+ */
+async function runBaselineAnalysis(apiKey, serverUrl) {
+    const useBackend = !!(apiKey);
+
+    const [existing, currentConnections] = await Promise.all([
+        useBackend ? loadBaselineFromAPI(apiKey, serverUrl) : loadBaselineFromCache(),
+        readEgressLog(),
+    ]);
+
+    const { newDestinations, knownDestinations, firstRun } = diffBaseline(currentConnections, existing);
+    const updated = mergeBaseline(existing, currentConnections);
+
+    // Save to backend AND cache if API key present; cache-only otherwise
+    if (useBackend) {
+        await saveBaselineToAPI(apiKey, serverUrl, updated);
+        await saveBaselineToCache(updated); // also save to cache as local backup
+    } else {
+        await saveBaselineToCache(updated);
+    }
+
+    return {
+        newDestinations,
+        knownDestinations,
+        firstRun,
+        runs: updated.runs,
+        totalKnown: Object.keys(updated.baseline).length,
+        storedIn: useBackend ? "backend+cache" : "cache",
+    };
+}
+
+module.exports = {
+    runBaselineAnalysis,
+    loadBaselineFromAPI,
+    saveBaselineToAPI,
+    loadBaselineFromCache,
+    saveBaselineToCache,
+    readEgressLog,
+    diffBaseline,
+    mergeBaseline,
+};
+
+
+/***/ }),
+
 /***/ 4914:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -28415,6 +28656,22 @@ exports.fromPromise = function (fn) {
 
 /***/ }),
 
+/***/ 2167:
+/***/ ((module) => {
+
+module.exports = eval("require")("@actions/cache");
+
+
+/***/ }),
+
+/***/ 1473:
+/***/ ((module) => {
+
+module.exports = eval("require")("axios");
+
+
+/***/ }),
+
 /***/ 2613:
 /***/ ((module) => {
 
@@ -30338,40 +30595,300 @@ var __webpack_exports__ = {};
 const core = __nccwpck_require__(7484);
 const exec = __nccwpck_require__(5236);
 const fs = __nccwpck_require__(2136);
+const { execSync } = __nccwpck_require__(5317);
+const axios = __nccwpck_require__(1473);
+const { runBaselineAnalysis } = __nccwpck_require__(9421);
 
-async function readAndLog(logType, logPath) {
+const FIM_LOG_PATH = "/tmp/roc-fim-events.jsonl";
+
+// ----------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------
+async function readLog(logType, logPath) {
   try {
     if (await fs.pathExists(logPath)) {
-      core.info(`--- ROC ${logType} ---`);
-      const logContent = await fs.readFile(logPath, "utf8");
-      core.info(logContent);
-      core.info(`--- End ROC ${logType} ---`);
-    } else {
-      core.info(`ROC ${logType} log file not found at ${logPath}`);
+      const content = await fs.readFile(logPath, "utf8");
+      if (content.trim()) {
+        core.info(`--- ROC ${logType} ---`);
+        core.info(content);
+        core.info(`--- End ROC ${logType} ---`);
+      }
+      return content;
     }
-  } catch (error) {
-    core.warning(`Error reading ROC ${logType} log: ${error.message}`);
+  } catch (e) {
+    core.warning(`Error reading ROC ${logType}: ${e.message}`);
+  }
+  return "";
+}
+
+async function readSummaryStats() {
+  try {
+    if (await fs.pathExists("/tmp/roc-summary.json")) {
+      return await fs.readJson("/tmp/roc-summary.json");
+    }
+  } catch (e) {
+    core.debug(`Could not read roc-summary.json: ${e.message}`);
+  }
+  return null;
+}
+
+async function getContainerStats(containerId) {
+  if (!containerId) return null;
+  try {
+    const out = execSync(
+      `sudo docker inspect --format='{{json .State}}' ${containerId} 2>/dev/null`,
+      { encoding: "utf8" }
+    ).trim();
+    return JSON.parse(out);
+  } catch (_) {
+    return null;
   }
 }
 
-async function cleanup() {
+// ----------------------------------------------------------------
+// FIM event reader + uploader
+// ----------------------------------------------------------------
+async function readFIMEvents() {
   try {
-    await readAndLog("stdout", "/tmp/roc-stdout.log");
-    await readAndLog("stderr", "/tmp/roc-stderr.log");
+    if (!(await fs.pathExists(FIM_LOG_PATH))) return [];
+    const content = await fs.readFile(FIM_LOG_PATH, "utf8");
+    const events = [];
+    for (const line of content.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      try { events.push(JSON.parse(t)); } catch { /* skip malformed */ }
+    }
+    return events;
+  } catch (e) {
+    core.warning(`[FIM] Error reading fim-events log: ${e.message}`);
+    return [];
+  }
+}
 
+async function uploadFIMEvents(events, apiKey, serverUrl) {
+  if (!apiKey || events.length === 0) return;
+  const base = serverUrl || "https://app.o3security.io";
+  try {
+    await axios.post(`${base}/api/v1/roc/fim/events`, {
+      repo: process.env.GITHUB_REPOSITORY || "",
+      runId: process.env.GITHUB_RUN_ID || "",
+      job: process.env.GITHUB_JOB || "",
+      branch: process.env.GITHUB_REF_NAME || "",
+      events,
+    }, {
+      headers: { Authorization: `apiKey ${apiKey}`, "Content-Type": "application/json" },
+      timeout: 15000,
+    });
+    core.info(`[FIM] ✅ Uploaded ${events.length} FIM event(s) to backend`);
+  } catch (e) {
+    core.warning(`[FIM] Could not upload events to backend: ${e.message}`);
+  }
+}
+
+// ----------------------------------------------------------------
+// GitHub Step Summary writer
+// ----------------------------------------------------------------
+async function writeStepSummary(stats, egressPolicy, containerId, baselineReport, fimEvents) {
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (!summaryPath) {
+    core.debug("GITHUB_STEP_SUMMARY not set, skipping summary write.");
+    return;
+  }
+
+  const repo = process.env.GITHUB_REPOSITORY || "unknown";
+  const runId = process.env.GITHUB_RUN_ID || "";
+  const job = process.env.GITHUB_JOB || "";
+  const workflow = process.env.GITHUB_WORKFLOW || "";
+
+  let secretSection = "";
+  let alertIcon = "✅";
+
+  if (stats && stats.secrets_found > 0) {
+    alertIcon = "🚨";
+    secretSection = `
+### 🚨 Secrets Detected in Network Traffic
+
+| Pattern | Destination | Step |
+|---------|-------------|------|
+${(stats.secret_details || []).map(s =>
+      `| \`${s.pattern || "regex"}\` | \`${s.destination || "unknown"}\` | ${s.step || "-"} |`
+    ).join("\n")}
+
+> **Action Required:** Rotate the above credentials immediately.
+`;
+  }
+
+  let egressSection = "";
+  if (stats && stats.blocked_connections > 0) {
+    egressSection = `
+### 🚫 Blocked Egress Connections (${stats.blocked_connections})
+
+| Destination | Port | Step |
+|-------------|------|------|
+${(stats.blocked_details || []).map(b =>
+      `| \`${b.host || b.ip}\` | ${b.port} | ${b.step || "-"} |`
+    ).join("\n")}
+`;
+  }
+
+  // Automated baseline section
+  let baselineSection = "";
+  if (baselineReport) {
+    if (baselineReport.firstRun) {
+      baselineSection = `
+### 📊 Egress Baseline
+
+> **First run** — establishing baseline with ${Object.keys(baselineReport.knownDestinations).length} destinations observed.  
+> Future runs will flag any **new** outbound connections not seen today.
+`;
+    } else {
+      const newRows = baselineReport.newDestinations.length > 0
+        ? baselineReport.newDestinations.map(d => `| \`${d}\` | ⚠️ NEW |`).join("\n")
+        : "| *(none)* | ✅ |";
+      if (baselineReport.newDestinations.length > 0) {
+        alertIcon = alertIcon === "✅" ? "⚠️" : alertIcon;
+      }
+      baselineSection = `
+### 📊 Egress Baseline (run #${baselineReport.runs})
+
+| Destination | Status |
+|-------------|--------|
+${newRows}
+
+**Known destinations:** ${baselineReport.knownDestinations.length} &nbsp; **Baseline size:** ${baselineReport.totalKnown}
+`;
+    }
+  }
+
+  // FIM violations section
+  let fimSection = "";
+  if (fimEvents && fimEvents.length > 0) {
+    alertIcon = alertIcon === "✅" ? "🔍" : alertIcon;
+    const rows = fimEvents.slice(0, 20).map(e =>
+      `| \`${e.path || "-"}\` | ${e.action || "?"} | ${e.step_name || "-"} | \`${(e.sha256 || "").slice(0, 12)}…\` |`
+    ).join("\n");
+    const more = fimEvents.length > 20 ? `\n> _…and ${fimEvents.length - 20} more events_` : "";
+    fimSection = `
+### 🔍 File Integrity Violations (${fimEvents.length})
+
+| File | Action | Step | SHA256 (after) |
+|------|--------|------|----------------|
+${rows}${more}
+`;
+  }
+
+  const tlsCount = stats ? (stats.tls_connections || 0) : "–";
+  const secretsFound = stats ? (stats.secrets_found || 0) : "–";
+  const uniqueDests = stats ? (stats.unique_destinations || 0) : "–";
+  const blockedCount = stats ? (stats.blocked_connections || 0) : "–";
+
+  const serverUrl = core.getState("serverUrl") || "https://app.o3security.io";
+  const dashboardUrl = `${serverUrl}/projects`;
+
+  const md = `
+## ${alertIcon} O3 Security ROC Agent — Security Summary
+
+**Workflow:** \`${workflow}\` | **Job:** \`${job}\` | **Run:** [#${runId}](https://github.com/${repo}/actions/runs/${runId})
+
+| Metric | Value |
+|--------|-------|
+| TLS/SSL connections captured | **${tlsCount}** |
+| Secrets detected in traffic | **${secretsFound}** |
+| Unique egress destinations | **${uniqueDests}** |
+| Connections blocked | **${blockedCount}** |
+| FIM file violations | **${fimEvents ? fimEvents.length : "-"}** |
+| Egress policy | \`${egressPolicy || "audit"}\` |
+
+${secretSection}
+${egressSection}
+${fimSection}
+${baselineSection}
+---
+🛡️ Powered by [O3 Security ROC Agent](https://github.com/o3security/roc-agent)  
+[View full analysis →](${dashboardUrl})
+`;
+
+  try {
+    await fs.appendFile(summaryPath, md);
+    core.info("✅ Security summary written to GitHub Step Summary.");
+  } catch (e) {
+    core.warning(`Could not write Step Summary: ${e.message}`);
+  }
+}
+
+
+// ----------------------------------------------------------------
+// Main cleanup
+// ----------------------------------------------------------------
+async function cleanup() {
+  const egressPolicy = core.getState("egressPolicy") || "audit";
+  const containerId = core.getState("containerId") || "";
+  const apiKey = core.getInput("api_key") || "";
+  const serverUrl = core.getState("serverUrl") || "https://app.o3security.io";
+
+  core.info("O3 Security ROC Agent: stopping monitor and collecting results...");
+
+  try {
+    // 1. Signal ROC binary to flush summary
     const rocPid = core.getState("rocPid");
     if (rocPid) {
-      core.info(`Stopping ROC process with PID: ${rocPid}`);
-      // Use sudo to ensure permissions to kill the process started with sudo
-      await exec.exec("sudo", ["kill", "-SIGINT", rocPid]);
-      core.info(`Successfully sent SIGINT to ROC process ${rocPid}.`);
-    } else {
-      core.info("No ROC PID found, skipping cleanup.");
+      core.info(`Sending SIGINT to ROC process PID: ${rocPid}`);
+      try { await exec.exec("sudo", ["kill", "-SIGINT", rocPid]); } catch (_) { }
+      await sleep(3000);
     }
-  } catch (error) {
-    // Don't fail the workflow if cleanup fails, just log it
-    core.warning(`Failed to stop ROC process: ${error.message}`);
+    // 2. Stop container
+    if (containerId) {
+      core.info(`Stopping ROC container: ${containerId}`);
+      try { await exec.exec("sudo", ["docker", "stop", "--time=5", containerId]); } catch (_) { }
+    }
+  } catch (e) {
+    core.warning(`Error during ROC stop: ${e.message}`);
   }
+
+  // 3. Read logs
+  await readLog("stdout", "/tmp/roc-stdout.log");
+  await readLog("stderr", "/tmp/roc-stderr.log");
+
+  // 4. Read FIM events + upload to backend
+  const fimEvents = await readFIMEvents();
+  if (fimEvents.length > 0) {
+    core.warning(`[FIM] ⚠️  ${fimEvents.length} file integrity violation(s) detected during build!`);
+    await uploadFIMEvents(fimEvents, apiKey, serverUrl);
+  }
+
+  // 5. Run automated baseline analysis (load → diff → save)
+  let baselineReport = null;
+  if (core.getInput("baseline_enabled") !== "false") {
+    try {
+      baselineReport = await runBaselineAnalysis(apiKey, serverUrl);
+      if (baselineReport.newDestinations.length > 0) {
+        core.warning(
+          `[Baseline] ⚠️  ${baselineReport.newDestinations.length} new egress destination(s): ` +
+          baselineReport.newDestinations.join(", ")
+        );
+      } else if (!baselineReport.firstRun) {
+        core.info("[Baseline] ✅ All egress matches baseline — no new connections");
+      }
+    } catch (e) {
+      core.warning(`[Baseline] Analysis failed (non-fatal): ${e.message}`);
+    }
+  }
+
+  // 6. Read stats + write GitHub Step Summary
+  const stats = await readSummaryStats();
+  await writeStepSummary(stats, egressPolicy, containerId, baselineReport, fimEvents);
+
+  // 7. Warn on secrets
+  if (stats && stats.secrets_found > 0) {
+    core.warning(
+      `🚨 O3 Security: ${stats.secrets_found} secret(s) detected in network traffic. ` +
+      "Review the Step Summary above and rotate affected credentials."
+    );
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 cleanup();
