@@ -39996,14 +39996,17 @@ async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, 
               secrets.push({
                 pattern_id: s.pattern_id || 'unknown',
                 severity: s.severity || 'high',
-                matched_text: s.matched_text ? s.matched_text.slice(0, 4) + '***' : '***',
+                // Store full matched_text — UI handles masking
+                matched_text: s.matched_text || null,
                 destination: ev.domain || ev.ip || null,
                 step_name: parseStepName(s.evidence) || ev.comm || null,
                 evidence_snippet: (s.evidence || '').slice(0, 300),
+                // Full process tree
                 process: {
                   comm: ev.comm || null,
-                  cmdline: (ev.cmdline || '').slice(0, 120),
+                  cmdline: ev.cmdline || null,
                   parent_comm: ev.parent_comm || null,
+                  parent_cmdline: ev.parent_cmdline || null,
                 },
               });
             }
@@ -40012,10 +40015,10 @@ async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, 
             secrets.push({
               pattern_id: 'detected',
               severity: 'high',
-              matched_text: '***',
+              matched_text: null,
               destination: ev.domain || ev.ip || null,
               step_name: ev.comm || null,
-              process: { comm: ev.comm, cmdline: ev.cmdline, parent_comm: ev.parent_comm },
+              process: { comm: ev.comm, cmdline: ev.cmdline, parent_comm: ev.parent_comm, parent_cmdline: ev.parent_cmdline },
             });
           }
         } catch (_) { /* skip malformed lines */ }
@@ -40033,10 +40036,46 @@ async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, 
     : Array.isArray(baselineReport?.newDestinations)
       ? baselineReport.newDestinations
       : [];
-  const egress_deviations = rawDeviations.map(d => typeof d === 'string'
-    ? { destination: d, severity: 'medium', is_new: true }
-    : { destination: d.key || d.destination || String(d), severity: d.severity || 'medium', is_new: true, process: { comm: d.comm, cmdline: d.cmdline, parent_comm: d.parent_comm } }
-  );
+  // Parse egress deviation strings: "104.16.8.34:443:npm install lod" → structured objects
+  function parseDeviationEntry(d) {
+    if (typeof d === 'object' && d !== null) {
+      // Already structured — parse host:port from destination if needed
+      const dest = d.key || d.destination || '';
+      const colonIdx = dest.indexOf(':');
+      const host = colonIdx > -1 ? dest.slice(0, colonIdx) : dest;
+      const rest = colonIdx > -1 ? dest.slice(colonIdx + 1) : '';
+      const portEnd = rest.indexOf(':');
+      const port = portEnd > -1 ? rest.slice(0, portEnd) : rest;
+      return {
+        host: host || null,
+        port: port || null,
+        destination: dest,
+        severity: d.severity || 'medium',
+        is_new: true,
+        process_comm: d.comm || null,
+        process_cmdline: d.cmdline || null,
+        parent_comm: d.parent_comm || null,
+      };
+    }
+    // String format: "IP:PORT:SOME CMDLINE" e.g. "104.16.8.34:443:npm install lodash"
+    const str = String(d);
+    const parts = str.split(':');
+    const host = parts[0] || null;
+    const port = parts[1] || null;
+    // Everything after IP:PORT is part of the process/command
+    const processPart = parts.slice(2).join(':').trim() || null;
+    return {
+      host,
+      port,
+      destination: host && port ? `${host}:${port}` : str,
+      severity: 'medium',
+      is_new: true,
+      process_comm: processPart ? processPart.split(' ')[0] : null,
+      process_cmdline: processPart || null,
+      parent_comm: null,
+    };
+  }
+  const egress_deviations = rawDeviations.map(parseDeviationEntry);
 
   // FIM events
   const fim = fimEvents.map(e => ({
