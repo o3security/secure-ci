@@ -161,7 +161,11 @@ function parseStepName(evidence) {
 // Called at job-end with all accumulated data.
 // ----------------------------------------------------------------
 async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, stats) {
-  if (!apiKey) return;
+  if (!apiKey) {
+    core.info('[PipelineVuln] No API key — skipping');
+    return;
+  }
+  core.info(`[PipelineVuln] Starting upload (serverUrl=${serverUrl})`);
 
   let stepContext = {};
   try {
@@ -232,6 +236,8 @@ async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, 
     process: { comm: e.comm, cmdline: e.cmdline, parent_comm: e.parent_comm },
   }));
 
+  core.info(`[PipelineVuln] Collected: secrets=${secrets.length} egress_deviations=${egress_deviations.length} fim=${fim.length}`);
+
   // Skip if nothing to report
   if (secrets.length === 0 && egress_deviations.length === 0 && fim.length === 0) {
     core.info('[PipelineVuln] Nothing to report — skipping vulnerability creation');
@@ -297,10 +303,18 @@ async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, 
     );
 
     const result = resp.data?.data?.UploadPipelineSecurityFindings;
-    core.info(`[PipelineVuln] ✅ Vulnerability recorded: ${result?.message || 'ok'}`);
+    // Capture any GQL-level errors (these are NOT HTTP errors, so catch won't catch them)
+    if (resp.data?.errors?.length) {
+      core.warning(`[PipelineVuln] GQL errors: ${JSON.stringify(resp.data.errors)}`);
+    } else if (result?.status === false) {
+      core.warning(`[PipelineVuln] Mutation returned false: ${result.message}`);
+    } else {
+      core.info(`[PipelineVuln] ✅ Vulnerability recorded: ${result?.message || 'ok'}`);
+    }
   } catch (e) {
     // Non-fatal — pipeline still succeeds
-    core.warning(`[PipelineVuln] Could not record pipeline vuln (non-fatal): ${e.message}`);
+    const detail = e.response?.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message;
+    core.warning(`[PipelineVuln] Could not record pipeline vuln (non-fatal): ${detail}`);
   }
 }
 
