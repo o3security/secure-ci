@@ -835,15 +835,26 @@ async function cleanup() {
                 timeout: 8000,
               });
               const vulns = secResp.data?.data?.GetPipelineSecurityVulns?.data || [];
+              // Match on run_id OR last_run_id (cross-run dedup updates last_run_id, not run_id)
               const secretVulns = vulns.filter(v => {
                 const ctx = v.pipeline_context;
-                return ctx && ctx.run_id === runId &&
-                  Array.isArray(ctx.captures) &&
-                  ctx.captures.some(c => c.type === 'secret' || c.type === 'secret_exfiltration');
+                if (!ctx) return false;
+                const matchesRun = ctx.run_id === runId || ctx.last_run_id === runId;
+                // Has secrets in the top-level secrets array (new format)
+                const hasSecrets = Array.isArray(ctx.secrets) && ctx.secrets.length > 0;
+                // OR has captures with non-empty secrets (old format)
+                const hasCaptures = Array.isArray(ctx.captures) &&
+                  ctx.captures.some(c => Array.isArray(c.secrets) && c.secrets.length > 0);
+                return matchesRun && (hasSecrets || hasCaptures);
               });
               if (secretVulns.length > 0) {
-                baselineReport.secretsFound = secretVulns.length;
-                core.warning(`[Secrets] 🚨 ${secretVulns.length} secret finding(s) for run ${runId}`);
+                // Count total distinct secrets found (not just number of vuln docs)
+                const totalSecrets = secretVulns.reduce((sum, v) => {
+                  const ctx = v.pipeline_context;
+                  return sum + (Array.isArray(ctx?.secrets) ? ctx.secrets.length : 1);
+                }, 0);
+                baselineReport.secretsFound = totalSecrets;
+                core.warning(`[Secrets] 🚨 ${totalSecrets} secret(s) in ${secretVulns.length} finding(s) for run ${runId}`);
               }
             } catch (sErr) {
               core.debug(`[Baseline] Could not query secrets: ${sErr.message}`);
