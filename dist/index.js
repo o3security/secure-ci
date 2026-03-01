@@ -30493,6 +30493,29 @@ async function run() {
     core.saveState("serverUrl", serverUrl);
     core.setOutput("roc_pid", rocProcess.pid.toString());
 
+    // ── Spawn egress-interceptor (Node.js HTTP request capture) ──────────────
+    // The roc binary captures TCP-level metadata (host/port/comm) but NOT HTTP
+    // request details (method/URL/headers). The interceptor monkey-patches
+    // Node's net/https/http to append full request info to the same JSONL log.
+    try {
+      const interceptorPath = __nccwpck_require__.ab + "egress-interceptor.js";
+      const iOut = fs.openSync('/tmp/roc-interceptor.log', 'a');
+      const interceptorProc = spawn(
+        process.execPath,
+        [interceptorPath, '/tmp/roc-egress-log.jsonl', '/tmp/roc-fim-events.jsonl', workspace || ''],
+        {
+          detached: true,
+          stdio: ['ignore', iOut, iOut],
+          env: { ...process.env, GITHUB_WORKSPACE: workspace || '' },
+        }
+      );
+      interceptorProc.unref();
+      core.saveState('interceptorPid', String(interceptorProc.pid));
+      core.info(`[Interceptor] HTTP capture running (PID: ${interceptorProc.pid})`);
+    } catch (e) {
+      core.warning(`[Interceptor] Could not start: ${e.message}`);
+    }
+
     // ── Health check ──────────────────────────────────────────────────────
     // Wait longer to account for image pull time on first run
     await sleep(8000);

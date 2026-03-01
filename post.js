@@ -607,7 +607,13 @@ async function cleanup() {
   core.info("O3 Security ROC Agent: stopping monitor and collecting results...");
 
   try {
-    // 1. Signal ROC binary to flush summary
+    // 1. Kill egress interceptor first (flush any pending writes)
+    const interceptorPid = core.getState('interceptorPid');
+    if (interceptorPid) {
+      try { process.kill(parseInt(interceptorPid), 'SIGTERM'); } catch (_) { }
+      await sleep(500);
+    }
+    // 2. Signal ROC binary to flush summary
     const rocPid = core.getState("rocPid");
     if (rocPid) {
       core.info(`Sending SIGINT to ROC process PID: ${rocPid}`);
