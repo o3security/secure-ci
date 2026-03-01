@@ -30416,7 +30416,9 @@ async function run() {
       "-v", "/opt:/opt:ro",
       "-v", "/snap:/snap:ro",
       "-v", "/root:/root:ro",
-      "-v", "/tmp:/tmp",          // shares /tmp/roc-step-context.json + policy YAML
+      "-v", "/tmp:/tmp",          // shares /tmp/roc-step-context.json + policy YAML + fim-log
+      // Mount the workspace at the SAME path so inotify can watch host source files
+      // (without this the GITHUB_WORKSPACE path doesn't exist inside the container)
       // CI/CD env vars for event tagging
       "-e", `GITHUB_REPOSITORY=${stepContext.repository}`,
       "-e", `GITHUB_RUN_ID=${stepContext.run_id}`,
@@ -30464,8 +30466,20 @@ async function run() {
     if (patterns) dockerArgs.push("--pattern", await resolvePatterns(patterns));
 
     // File integrity monitoring
+    // Mount the workspace at the SAME path so the binary's inotify can watch host files.
+    // The root filesystem is mounted at /host:ro, but the binary uses the original path
+    // directly — so we need an explicit rw bind-mount of the workspace.
     const workspace = process.env.GITHUB_WORKSPACE;
-    if (workspace) dockerArgs.push("--workspace", workspace);
+    if (workspace) {
+      // Insert the volume mount BEFORE the image name in dockerArgs
+      // (dockerArgs already has the image at position -3 from end: [image, "all", "-m", "text"])
+      const imgIdx = dockerArgs.indexOf(dockerImage);
+      if (imgIdx !== -1) {
+        dockerArgs.splice(imgIdx, 0, "-v", `${workspace}:${workspace}:rw`);
+      }
+      dockerArgs.push("--workspace", workspace);
+      core.info(`[FIM] Watching workspace: ${workspace}`);
+    }
     dockerArgs.push("--fim-log", "/tmp/roc-fim-events.jsonl");
 
     // Egress log for automated baseline (post.js reads this)
