@@ -40239,33 +40239,35 @@ async function cleanup() {
               core.debug(`[Baseline] Could not fetch entries: ${eErr.message}`);
             }
 
-            // Query secret findings for this run from pipeline security vulns
+            // Query secret findings for this run from pipeline security vulns (server-side filtered)
             try {
               const runId = stepCtx.run_id || process.env.GITHUB_RUN_ID || '';
               const secResp = await axios.post(gqlEndpoint, {
-                query: `query { GetPipelineSecurityVulns(limit: 100, page: 1) {
-                  data { vuln_type pipeline_context }
-                }}`,
-                variables: {},
+                query: `query GetSecretVulns($run_id: String, $limit: Int, $page: Int) {
+                  GetPipelineSecurityVulns(run_id: $run_id, limit: $limit, page: $page) {
+                    totalCount
+                    data { pipeline_context }
+                  }
+                }`,
+                variables: { run_id: runId, limit: 20, page: 1 },
               }, {
                 headers: { authorization: `apiKey ${apiKey}`, 'Content-Type': 'application/json' },
                 timeout: 8000,
               });
-              const vulns = secResp.data?.data?.GetPipelineSecurityVulns?.data || [];
-              // Match on run_id OR last_run_id (cross-run dedup updates last_run_id, not run_id)
+              const secData = secResp.data?.data?.GetPipelineSecurityVulns;
+              const vulns = secData?.data || [];
+              core.info(`[Secrets] Query returned ${vulns.length}/${secData?.totalCount ?? '?'} vulns for run ${runId}`);
               const secretVulns = vulns.filter(v => {
                 const ctx = v.pipeline_context;
                 if (!ctx) return false;
-                const matchesRun = ctx.run_id === runId || ctx.last_run_id === runId;
                 // Has secrets in the top-level secrets array (new format)
                 const hasSecrets = Array.isArray(ctx.secrets) && ctx.secrets.length > 0;
                 // OR has captures with non-empty secrets (old format)
                 const hasCaptures = Array.isArray(ctx.captures) &&
                   ctx.captures.some(c => Array.isArray(c.secrets) && c.secrets.length > 0);
-                return matchesRun && (hasSecrets || hasCaptures);
+                return hasSecrets || hasCaptures;
               });
               if (secretVulns.length > 0) {
-                // Count total distinct secrets found (not just number of vuln docs)
                 const totalSecrets = secretVulns.reduce((sum, v) => {
                   const ctx = v.pipeline_context;
                   return sum + (Array.isArray(ctx?.secrets) ? ctx.secrets.length : 1);
@@ -40274,7 +40276,7 @@ async function cleanup() {
                 core.warning(`[Secrets] 🚨 ${totalSecrets} secret(s) in ${secretVulns.length} finding(s) for run ${runId}`);
               }
             } catch (sErr) {
-              core.debug(`[Baseline] Could not query secrets: ${sErr.message}`);
+              core.warning(`[Baseline] Could not query secrets: ${sErr.message}`);
             }
           }
         } catch (qErr) {
