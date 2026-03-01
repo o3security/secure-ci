@@ -40028,7 +40028,53 @@ async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, 
     core.debug(`[PipelineVuln] Could not read egress log: ${e.message}`);
   }
 
-  // Egress deviations from baseline report
+  // ── Build egress deviations ───────────────────────────────────────────────
+  // Source 1: egress JSONL log (from egress-interceptor or roc binary) — has full request data
+  const egressLogEntries = [];
+  try {
+    const EGRESS_LOG = "/tmp/roc-egress-log.jsonl";
+    if (await fs.pathExists(EGRESS_LOG)) {
+      const content = await fs.readFile(EGRESS_LOG, "utf8");
+      for (const line of content.split("\n")) {
+        const t = line.trim();
+        if (!t) continue;
+        try {
+          const ev = JSON.parse(t);
+          // Skip entries that are just "secrets=true" flags (not real egress)
+          if (ev.secrets === true) continue;
+          const host = ev.domain || ev.ip || null;
+          const port = ev.port ? String(ev.port) : null;
+          if (!host) continue;
+          egressLogEntries.push({
+            host,
+            port,
+            destination: host && port ? `${host}:${port}` : host,
+            severity: ev.severity || 'info',
+            is_new: false, // these are all observed connections
+            protocol: ev.protocol || null,
+            process_comm: ev.comm || null,
+            process_cmdline: ev.cmdline || null,
+            parent_comm: ev.parent_comm || null,
+            // Full request captured by egress-interceptor
+            request: ev.request
+              ? {
+                method: ev.request.method || null,
+                uri: ev.request.uri || null,
+                host: ev.request.host || host,
+                url: ev.request.url || null,
+                headers: ev.request.headers || null,
+              }
+              : null,
+            timestamp: ev.timestamp || null,
+          });
+        } catch (_) { /* skip malformed */ }
+      }
+    }
+  } catch (e) {
+    core.debug(`[PipelineVuln] Could not read egress log for full requests: ${e.message}`);
+  }
+
+  // Source 2: baseline deviations — high-severity / new destinations
   // baselineReport.deviations is a NUMBER (count), not an array.
   // baselineReport.newDestinations OR high_severity_deviations is the actual array.
   const rawDeviations = Array.isArray(baselineReport?.high_severity_deviations)
@@ -40039,7 +40085,6 @@ async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, 
   // Parse egress deviation strings: "104.16.8.34:443:npm install lod" → structured objects
   function parseDeviationEntry(d) {
     if (typeof d === 'object' && d !== null) {
-      // Already structured — parse host:port from destination if needed
       const dest = d.key || d.destination || '';
       const colonIdx = dest.indexOf(':');
       const host = colonIdx > -1 ? dest.slice(0, colonIdx) : dest;
@@ -40055,6 +40100,7 @@ async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, 
         process_comm: d.comm || null,
         process_cmdline: d.cmdline || null,
         parent_comm: d.parent_comm || null,
+        request: d.request || null,
       };
     }
     // String format: "IP:PORT:SOME CMDLINE" e.g. "104.16.8.34:443:npm install lodash"
@@ -40062,7 +40108,6 @@ async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, 
     const parts = str.split(':');
     const host = parts[0] || null;
     const port = parts[1] || null;
-    // Everything after IP:PORT is part of the process/command
     const processPart = parts.slice(2).join(':').trim() || null;
     return {
       host,
@@ -40073,9 +40118,28 @@ async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, 
       process_comm: processPart ? processPart.split(' ')[0] : null,
       process_cmdline: processPart || null,
       parent_comm: null,
+      request: null,
     };
   }
-  const egress_deviations = rawDeviations.map(parseDeviationEntry);
+  const baselineDeviations = rawDeviations.map(parseDeviationEntry);
+
+  // Merge: mark baseline deviations with is_new=true, enrich with request data from log if available
+  const deviationDestSet = new Set(baselineDeviations.map(d => d.destination));
+  for (const entry of egressLogEntries) {
+    if (deviationDestSet.has(entry.destination)) {
+      // Enrich the baseline deviation with full request data from log
+      const bd = baselineDeviations.find(d => d.destination === entry.destination);
+      if (bd && entry.request) bd.request = entry.request;
+      if (bd && entry.process_comm && !bd.process_comm) bd.process_comm = entry.process_comm;
+      if (bd && entry.process_cmdline && !bd.process_cmdline) bd.process_cmdline = entry.process_cmdline;
+    }
+  }
+  // Final list: baseline deviations (enriched) + any log entries NOT in baseline (all observed traffic)
+  const egress_deviations = [
+    ...baselineDeviations,
+    ...egressLogEntries.filter(e => !deviationDestSet.has(e.destination)),
+  ];
+
 
   // FIM events
   const fim = fimEvents.map(e => ({
