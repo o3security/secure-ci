@@ -96,7 +96,21 @@ async function run() {
     // Add API credentials if provided
     if (apiKey) dockerArgs.push("--api-key", apiKey);
     if (serverUrl) dockerArgs.push("--server-url", serverUrl);
-    if (projectName) dockerArgs.push("--project", projectName);
+
+    // project_name defaults to GITHUB_REPOSITORY so UploadTrafficRuntimeData
+    // always knows which project to associate captures with.
+    // Without this, the GQL mutation silently fails (returns status:false with HTTP 200)
+    // and the Captures table stays empty even when secrets are detected.
+    const effectiveProject = projectName || stepContext.repository;
+    if (effectiveProject) dockerArgs.push("--project", effectiveProject);
+
+    // --identifier lets the DPI binary fetch API patterns from the backend.
+    // Required for patternModeEnabled=true so secrets are scanned + uploaded.
+    // Defaults to the full GitHub repo URL (https://github.com/org/repo).
+    const repoUrl = stepContext.repository
+      ? `https://github.com/${stepContext.repository}`
+      : "";
+    if (repoUrl) dockerArgs.push("--identifier", repoUrl);
 
     // Inline policy file
     dockerArgs.push(...policyFileArg);
