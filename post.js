@@ -533,11 +533,8 @@ ${rows}${more}
   }
 
   const tlsCount = stats ? (stats.tls_connections || 0) : '–';
-  const secretsFound = stats ? (stats.secrets_found || 0) : '–';
   const uniqueDests = stats ? (stats.unique_destinations || 0) : '–';
   const blockedCount = stats ? (stats.blocked_connections || 0) : '–';
-  // secrets warning uses alertIcon
-  if (typeof secretsFound === 'number' && secretsFound > 0) alertIcon = '🚨';
 
   const serverUrl = core.getState("serverUrl") || "https://api.codexsecurity.io";
   const dashboardUrl = `${serverUrl}/projects`;
@@ -550,11 +547,10 @@ ${rows}${more}
 | Metric | Value |
 |--------|-------|
 | TLS/SSL connections captured | **${tlsCount}** |
-| Secrets detected in traffic | **${secretsFound}** |
 | Unique egress destinations | **${uniqueDests}** |
 | Connections blocked | **${blockedCount}** |
-| FIM file violations | **${fimEvents ? fimEvents.length : "-"}** |
-| Egress policy | \`${egressPolicy || "audit"}\` |
+| FIM file violations | **${fimEvents ? fimEvents.length : '-'}** |
+| Egress policy | \`${egressPolicy || 'audit'}\` |
 
 ${secretSection}
 ${egressSection}
