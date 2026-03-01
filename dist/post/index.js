@@ -39979,6 +39979,43 @@ async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, 
     }
   } catch (_) { /* non-fatal */ }
 
+  // ── Load pattern regexes for re-scanning secrets:true events ─────────────
+  // The roc binary writes secrets:true (boolean) — no matched text.
+  // We re-run the patterns ourselves on the available data (cmdline, domain, evidence snippets).
+  let loadedPatterns = [];
+  try {
+    const PATTERN_FILES = [
+      '/tmp/roc-inline-patterns.yaml',
+      '/tmp/roc-patterns.yaml',
+    ];
+    for (const pf of PATTERN_FILES) {
+      if (await fs.pathExists(pf)) {
+        const yaml = await fs.readFile(pf, 'utf8');
+        // Parse patterns: - id: foo\n  regex: 'bar'\n  severity: high
+        const patternMatches = [...yaml.matchAll(/[-]\s+id:\s*(\S+)[\s\S]*?regex:\s*['"]?([^'"\n]+)['"]?(?:[\s\S]*?severity:\s*(\S+))?/gm)];
+        for (const m of patternMatches) {
+          try {
+            loadedPatterns.push({ id: m[1], regex: new RegExp(m[2], 'g'), severity: (m[3] || 'high').replace(/[^a-z]/gi, '') });
+          } catch (_) { /* invalid regex, skip */ }
+        }
+        core.info(`[PipelineVuln] Loaded ${loadedPatterns.length} patterns from ${pf}`);
+        break;
+      }
+    }
+  } catch (e) {
+    core.debug(`[PipelineVuln] Could not load pattern file: ${e.message}`);
+  }
+
+  function scanForSecrets(text) {
+    if (!text || !loadedPatterns.length) return null;
+    for (const p of loadedPatterns) {
+      p.regex.lastIndex = 0;
+      const m = p.regex.exec(text);
+      if (m) return { pattern_id: p.id, matched_text: m[0], severity: p.severity };
+    }
+    return null;
+  }
+
   // Build secrets array from egress log entries that had secrets=true
   const secrets = [];
   try {
@@ -39993,15 +40030,19 @@ async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, 
           if (ev.secrets && ev.secrets !== true) {
             // ev.secrets is an array of {pattern_id, matched_text, evidence, evidence_type}
             for (const s of (Array.isArray(ev.secrets) ? ev.secrets : [])) {
+              // Re-scan evidence snippet if matched_text is missing
+              let matchedText = s.matched_text || null;
+              if (!matchedText && s.evidence) {
+                const scan = scanForSecrets(s.evidence);
+                if (scan) matchedText = scan.matched_text;
+              }
               secrets.push({
                 pattern_id: s.pattern_id || 'unknown',
                 severity: s.severity || 'high',
-                // Store full matched_text — UI handles masking
-                matched_text: s.matched_text || null,
+                matched_text: matchedText,
                 destination: ev.domain || ev.ip || null,
                 step_name: parseStepName(s.evidence) || ev.comm || null,
                 evidence_snippet: (s.evidence || '').slice(0, 300),
-                // Full process tree
                 process: {
                   comm: ev.comm || null,
                   cmdline: ev.cmdline || null,
@@ -40011,11 +40052,14 @@ async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, 
               });
             }
           } else if (ev.secrets === true) {
-            // Older format — just flag, no detail
+            // Older format — binary only sets flag, no detail
+            // Re-scan any available text fields with our own patterns
+            const scanTargets = [ev.cmdline, ev.parent_cmdline, ev.comm, ev.domain].filter(Boolean).join(' ');
+            const scan = scanForSecrets(scanTargets);
             secrets.push({
-              pattern_id: 'detected',
-              severity: 'high',
-              matched_text: null,
+              pattern_id: scan ? scan.pattern_id : 'detected',
+              severity: scan ? scan.severity : 'high',
+              matched_text: scan ? scan.matched_text : null,
               destination: ev.domain || ev.ip || null,
               step_name: ev.comm || null,
               process: { comm: ev.comm, cmdline: ev.cmdline, parent_comm: ev.parent_comm, parent_cmdline: ev.parent_cmdline },
@@ -40023,6 +40067,7 @@ async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, 
           }
         } catch (_) { /* skip malformed lines */ }
       }
+
     }
   } catch (e) {
     core.debug(`[PipelineVuln] Could not read egress log: ${e.message}`);
