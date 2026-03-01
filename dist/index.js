@@ -30518,6 +30518,18 @@ async function run() {
     }
 
     // ── Spawn container ───────────────────────────────────────────────────
+    // Pre-create shared /tmp log files with world-writable perms so the binary
+    // inside Docker can write to them (binary runs as root, but files created by
+    // a previous run may be owned by runner user with 644 → EACCES).
+    for (const logFile of ['/tmp/roc-fim-events.jsonl', '/tmp/roc-egress-log.jsonl']) {
+      try {
+        // Truncate existing file or create new one, then set 666 so any user can write
+        const fd = (__nccwpck_require__(9896).openSync)(logFile, 'w');
+        (__nccwpck_require__(9896).closeSync)(fd);
+        (__nccwpck_require__(9896).chmodSync)(logFile, 0o666);
+      } catch (_) { /* best-effort */ }
+    }
+
     const outStream = fs.openSync("/tmp/roc-stdout.log", "a");
     const errStream = fs.openSync("/tmp/roc-stderr.log", "a");
 

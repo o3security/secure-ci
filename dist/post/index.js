@@ -39718,12 +39718,14 @@ async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, 
     process: { comm: e.comm, cmdline: e.cmdline, parent_comm: e.parent_comm },
   }));
 
-  core.info(`[PipelineVuln] Collected: egress_deviations=${egress_deviations.length} fim=${fim.length}`);
-  // Note: secrets are now uploaded DIRECTLY by the Go binary via UploadTrafficRuntimeData.
-  // We always call UploadPipelineSecurityFindings regardless of egress/FIM count because:
-  // the binary runs inside Docker and cannot include CI context (repo, run_id, workflow, job,
-  // branch, actor, sha). This mutation merges that CI metadata into the binary-created vuln.
+  core.info(`[PipelineVuln] Collected: egress_deviations=${egress_deviations.length} fim=${fim.length} stats.secrets=${stats?.secrets_found ?? 0}`);
 
+  // Skip if nothing to report — avoids creating empty findings
+  const statsSecrets = stats?.secrets_found ?? 0;
+  if (egress_deviations.length === 0 && fim.length === 0 && statsSecrets === 0) {
+    core.info('[PipelineVuln] Nothing to report (no deviations, FIM events, or secrets) — skipping mutation');
+    return;
+  }
 
   const body = {
     repo: stepContext.repository || process.env.GITHUB_REPOSITORY || '',
