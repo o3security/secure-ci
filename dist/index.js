@@ -30498,7 +30498,12 @@ async function run() {
     // request details (method/URL/headers). The interceptor monkey-patches
     // Node's net/https/http to append full request info to the same JSONL log.
     try {
-      const interceptorPath = __nccwpck_require__.ab + "egress-interceptor.js";
+      // Use the ncc-bundled version (includes chokidar + all deps)
+      // Falls back to raw source if bundle not present
+      const bundlePath = (__nccwpck_require__(6928).join)(__dirname, 'interceptor', 'index.js');
+      const rawPath = __nccwpck_require__.ab + "egress-interceptor.js";
+      const fs = __nccwpck_require__(9896);
+      const interceptorPath = fs.existsSync(bundlePath) ? bundlePath : rawPath;
       const iOut = fs.openSync('/tmp/roc-interceptor.log', 'a');
       const interceptorProc = spawn(
         process.execPath,
@@ -30511,10 +30516,11 @@ async function run() {
       );
       interceptorProc.unref();
       core.saveState('interceptorPid', String(interceptorProc.pid));
-      core.info(`[Interceptor] HTTP capture running (PID: ${interceptorProc.pid})`);
+      core.info(`[Interceptor] HTTP capture running (PID: ${interceptorProc.pid}) from ${interceptorPath}`);
     } catch (e) {
       core.warning(`[Interceptor] Could not start: ${e.message}`);
     }
+
 
     // ── Health check ──────────────────────────────────────────────────────
     // Wait longer to account for image pull time on first run
