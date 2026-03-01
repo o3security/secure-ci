@@ -39949,6 +39949,131 @@ async function uploadFIMEvents(events, apiKey, serverUrl) {
 }
 
 // ----------------------------------------------------------------
+// Parse step_name from DPI evidence string
+// Evidence looks like: "2026-03-01T06:13:22Z ##[group]Run echo \"Testing...\""
+// Returns the step name extracted from the ##[group]Run prefix, or null
+// ----------------------------------------------------------------
+function parseStepName(evidence) {
+  if (!evidence) return null;
+  // Match ##[group]Run <step text>
+  const m = evidence.match(/##\[group\]Run (.+?)(?:\n|$)/);
+  if (m) return m[1].trim().slice(0, 80);
+  return null;
+}
+
+// ----------------------------------------------------------------
+// Upload full pipeline security finding to backend
+// Called at job-end with all accumulated data.
+// ----------------------------------------------------------------
+async function uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, stats) {
+  if (!apiKey) return;
+  const base = (serverUrl || "https://api.codexsecurity.io").replace(/\/graphql\/?$/, '');
+
+  let stepContext = {};
+  try {
+    if (await fs.pathExists('/tmp/roc-step-context.json')) {
+      stepContext = await fs.readJson('/tmp/roc-step-context.json');
+    }
+  } catch (_) { /* non-fatal */ }
+
+  // Build secrets array from egress log entries that had secrets=true
+  const secrets = [];
+  try {
+    const EGRESS_LOG = "/tmp/roc-egress-log.jsonl";
+    if (await fs.pathExists(EGRESS_LOG)) {
+      const content = await fs.readFile(EGRESS_LOG, "utf8");
+      for (const line of content.split("\n")) {
+        const t = line.trim();
+        if (!t) continue;
+        try {
+          const ev = JSON.parse(t);
+          if (ev.secrets && ev.secrets !== true) {
+            // ev.secrets is an array of {pattern_id, matched_text, evidence, evidence_type}
+            for (const s of (Array.isArray(ev.secrets) ? ev.secrets : [])) {
+              secrets.push({
+                pattern_id: s.pattern_id || 'unknown',
+                severity: s.severity || 'high',
+                matched_text: s.matched_text ? s.matched_text.slice(0, 4) + '***' : '***',
+                destination: ev.domain || ev.ip || null,
+                step_name: parseStepName(s.evidence) || ev.comm || null,
+                evidence_snippet: (s.evidence || '').slice(0, 300),
+                process: {
+                  comm: ev.comm || null,
+                  cmdline: (ev.cmdline || '').slice(0, 120),
+                  parent_comm: ev.parent_comm || null,
+                },
+              });
+            }
+          } else if (ev.secrets === true) {
+            // Older format — just flag, no detail
+            secrets.push({
+              pattern_id: 'detected',
+              severity: 'high',
+              matched_text: '***',
+              destination: ev.domain || ev.ip || null,
+              step_name: ev.comm || null,
+              process: { comm: ev.comm, cmdline: ev.cmdline, parent_comm: ev.parent_comm },
+            });
+          }
+        } catch (_) { /* skip malformed lines */ }
+      }
+    }
+  } catch (e) {
+    core.debug(`[PipelineVuln] Could not read egress log: ${e.message}`);
+  }
+
+  // Egress deviations from baseline report
+  const egress_deviations = (baselineReport?.deviations || baselineReport?.newDestinations || [])
+    .map(d => typeof d === 'string'
+      ? { destination: d, severity: 'medium', is_new: true }
+      : { destination: d.key || d.destination || d, severity: d.severity || 'medium', is_new: true, process: { comm: d.comm, cmdline: d.cmdline, parent_comm: d.parent_comm } }
+    );
+
+  // FIM events
+  const fim = fimEvents.map(e => ({
+    path: e.path || e.filename || null,
+    event_type: e.event_type || e.type || 'write',
+    severity: e.severity || 'medium',
+    timestamp: e.timestamp || null,
+    process: { comm: e.comm, cmdline: e.cmdline, parent_comm: e.parent_comm },
+  }));
+
+  // Skip if nothing to report
+  if (secrets.length === 0 && egress_deviations.length === 0 && fim.length === 0) {
+    core.info('[PipelineVuln] Nothing to report — skipping vulnerability creation');
+    return;
+  }
+
+  const body = {
+    repo: stepContext.repository || process.env.GITHUB_REPOSITORY || '',
+    run_id: stepContext.run_id || process.env.GITHUB_RUN_ID || '',
+    run_number: stepContext.run_number || process.env.GITHUB_RUN_NUMBER || '',
+    workflow: stepContext.workflow || process.env.GITHUB_WORKFLOW || '',
+    job: stepContext.job || process.env.GITHUB_JOB || '',
+    sha: stepContext.sha || process.env.GITHUB_SHA || '',
+    actor: stepContext.actor || process.env.GITHUB_ACTOR || '',
+    ref: process.env.GITHUB_REF || '',
+    branch: stepContext.branch || process.env.GITHUB_REF_NAME || '',
+    session_id: stats?.session_id || null,
+    project_name: stepContext.repository || process.env.GITHUB_REPOSITORY || '',
+    secrets,
+    fim_events: fim,
+    egress_deviations,
+  };
+
+  try {
+    const resp = await axios.post(`${base}/api/v1/roc/ingest/pipeline-vuln`, body, {
+      headers: { Authorization: `apiKey ${apiKey}`, 'Content-Type': 'application/json' },
+      timeout: 20000,
+    });
+    core.info(`[PipelineVuln] ✅ Vulnerability recorded: ${resp.data?.message || 'ok'}`);
+  } catch (e) {
+    // Non-fatal — pipeline still succeeds
+    core.warning(`[PipelineVuln] Could not record pipeline vuln (non-fatal): ${e.message}`);
+  }
+}
+
+// ----------------------------------------------------------------
 // GitHub Step Summary writer
 // ----------------------------------------------------------------
 async function writeStepSummary(stats, egressPolicy, containerId, baselineReport, fimEvents) {
@@ -40224,7 +40349,10 @@ async function cleanup() {
   const stats = await readSummaryStats();
   await writeStepSummary(stats, egressPolicy, containerId, baselineReport, fimEvents);
 
-  // 7. Warn on secrets
+  // 7. Upload pipeline security vulnerability (secrets + FIM + deviations) to backend
+  await uploadPipelineVuln(apiKey, serverUrl, fimEvents, baselineReport, stats);
+
+  // 8. Warn on secrets
   if (stats && stats.secrets_found > 0) {
     core.warning(
       `🚨 O3 Security: ${stats.secrets_found} secret(s) detected in network traffic. ` +

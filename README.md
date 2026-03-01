@@ -1,168 +1,205 @@
-# ROC Agent in GitHub Action
+# ROC Agent — O3 Security
 
-A GitHub Action for performing deep packet analysis using the ROC (Runtime Observability and Compliance) engine. This action provides automated security analysis of network traffic and system behavior during CI/CD workflows.
+A GitHub Action that monitors your CI/CD workflow for runtime security threats using deep packet inspection (DPI) and eBPF.
 
-## Overview
+**Decrypts SSL/TLS traffic** at the library level (no proxy, no cert changes) and detects secrets, credentials, and anomalous connections exfiltrated during your builds.
 
-The ROC Agent GitHub Action runs the ROC engine in a Docker container to monitor and analyze network activity and system behavior in your repository. It leverages pattern matching to detect potential security issues, compliance violations, and suspicious network traffic patterns.
+---
 
-## Features
+## Quick Start
 
-- Automated network and runtime analysis during CI/CD
-- Pattern-based detection of security vulnerabilities
-- Docker containerized execution
-- Customizable configuration and output directories
-- SSL library integration for secure analysis
-- Real-time monitoring and logging
-- Automatic cleanup of resources
-
-## Prerequisites
-
-- Docker must be available in the GitHub Actions runner
-- Valid API key for the license validation server
-- ROC configuration files (patterns, rules, etc.)
-
-## Usage
-
-### Basic Example
+### With O3 Security dashboard (full features)
 
 ```yaml
-name: ROC Security Analysis
-on: [push, pull_request]
+steps:
+  - uses: o3security/roc-agent@v1
+    with:
+      api_key: ${{ secrets.O3_API_KEY }}
+      project_name: my-app
 
-jobs:
-  roc-analysis:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Run ROC Analysis
-        uses: secai/roc-agent@v1
-        with:
-          server-url: ${{ secrets.ROC_SERVER_URL }}
-          api-key: ${{ secrets.ROC_API_KEY }}
-          patterns: pattern.yaml
+  - name: Build
+    run: npm install && npm run build
 ```
 
-### Complete Example with All Options
+Rules, whitelists, and alert thresholds are managed in the O3 Security dashboard — policy is fetched at job start via your `api_key`.
+
+### Open-source / no login required
 
 ```yaml
-name: Comprehensive ROC Analysis
-on: [push, pull_request]
+steps:
+  - uses: o3security/roc-agent@v1
+    with:
+      policy: audit        # monitor only — no account needed
+      print_only: "true"   # print events to the log
 
-jobs:
-  roc-analysis:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Setup ROC Configuration
-        run: |
-          mkdir -p roc-config
-          # Add your pattern files to the config directory
-          echo '# Your pattern configuration here' > roc-config/pattern.yaml
-
-      - name: Run ROC Analysis
-        uses: secai/roc-agent@v1
-        with:
-          server-url: ${{ secrets.ROC_SERVER_URL }}
-          api-key: ${{ secrets.ROC_API_KEY }}
-          patterns: pattern.yaml
-          config-dir: roc-config
-          output-dir: roc-output
-          docker-image: public.ecr.aws/f9o7b7m0/roc
-          additional-args: "--verbose --timeout 300"
-          ssl-lib-path: /lib/x86_64-linux-gnu
-          ssl-lib-version: "3"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  - name: Build
+    run: npm install && npm run build
 ```
+
+---
+
+## Inline Policy (open-source mode)
+
+Configure security policy directly in your workflow — no O3 Security account required.  
+Internally, the action converts these inputs to an inline YAML policy file and passes it to the DPI binary.
+
+### Audit mode (default)
+
+Monitor all outbound connections. Findings printed to the job log.
+
+```yaml
+- uses: o3security/roc-agent@v1
+  with:
+    policy: audit
+    print_only: "true"
+```
+
+### Block mode
+
+Drop TCP 80/443 connections to any destination not in `allowed_domains` / `allowed_ips` / `allowed_cidrs`.
+
+> **SSH (port 22) is always allowed first — you cannot be locked out of the runner.**
+
+```yaml
+- uses: o3security/roc-agent@v1
+  with:
+    policy: block
+    allowed_domains: |
+      api.github.com:443
+      *.githubusercontent.com
+      registry.npmjs.org:443
+      pypi.org:443
+    allowed_ips: ""
+    allowed_cidrs: |
+      10.0.0.0/8
+      192.168.0.0/16
+```
+
+### Block mode with secret detection patterns
+
+Combine egress blocking with custom secret scanning:
+
+```yaml
+- uses: o3security/roc-agent@v1
+  with:
+    policy: block
+    allowed_domains: |
+      api.github.com:443
+      registry.npmjs.org:443
+    patterns: .github/roc-patterns.yaml
+```
+
+Where `.github/roc-patterns.yaml`:
+```yaml
+patterns:
+  - id: aws_access_key
+    regex: 'AKIA[0-9A-Z]{16}'
+  - id: github_token
+    regex: 'ghp_[A-Za-z0-9]{36}'
+  - id: slack_webhook
+    regex: 'hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+'
+```
+
+### Inline policy YAML format (passed to `--policy-file`)
+
+The action auto-generates this from your action inputs, but you can also pass a file directly:
+
+```yaml
+# roc-policy.yaml
+policy: block           # audit | block
+
+whitelist:
+  domains:
+    - api.github.com:443
+    - "*.githubusercontent.com"
+    - registry.npmjs.org
+  ips:
+    - 1.1.1.1
+  cidrs:
+    - 10.0.0.0/8
+
+patterns:               # optional: secret detection
+  - id: aws_key
+    regex: 'AKIA[0-9A-Z]{16}'
+```
+
+---
 
 ## Inputs
 
-| Name | Required | Default | Description |
-|------|----------|---------|-------------|
-| `server-url` | Yes | `https://api.codexsecurity.io` | License validation server URL |
-| `api-key` | Yes | - | API key for authentication |
-| `patterns` | Yes | `pattern.yaml` | Path to YAML patterns file (relative to config dir) |
-| `config-dir` | No | `roc-config` | Directory containing ROC config files |
-| `output-dir` | No | `roc-output` | Directory for ROC output files |
-| `docker-image` | No | `public.ecr.aws/f9o7b7m0/roc` | ROC Docker image to use |
-| `additional-args` | No | `""` | Additional arguments to pass to ROC |
-| `ssl-lib-path` | No | `/lib/x86_64-linux-gnu` | Path to SSL library on host system |
-| `ssl-lib-version` | No | `"3"` | SSL library version (3 for libssl.so.3, 1.1 for libssl.so.1.1) |
+### O3 Security dashboard (optional)
 
-## Development
+| Input | Default | Description |
+|-------|---------|-------------|
+| `api_key` | _(empty)_ | API key from O3 Security (leave blank for open-source mode) |
+| `server_url` | `https://api.codexsecurity.io/graphql` | O3 Security API URL |
+| `project_name` | _(empty)_ | Project name in the dashboard |
 
-### Local Development
+### Inline policy (open-source mode)
 
-To build and test this action locally:
+| Input | Default | Description |
+|-------|---------|-------------|
+| `policy` | `audit` | `audit` — monitor only. `block` — drop TCP 80/443 not in allowlist |
+| `allowed_domains` | _(empty)_ | Allowed domains when `policy=block`. One per line or CSV. Supports `host:port` |
+| `allowed_ips` | _(empty)_ | Allowed IPs when `policy=block`. One per line or CSV |
+| `allowed_cidrs` | _(empty)_ | Allowed CIDR ranges when `policy=block`. One per line or CSV |
 
-1. Install dependencies:
-   ```bash
-   npm install
-   ```
+### Detection
 
-2. Build the action:
-   ```bash
-   npm run build
-   ```
+| Input | Description |
+|-------|-------------|
+| `patterns` | Path to a YAML file with custom regex patterns for secret scanning |
 
-3. Test the action locally (requires Docker):
-   ```bash
-   npm run dev
-   ```
+### SIEM Integration
 
-### Building for Production
+| Input | Description |
+|-------|-------------|
+| `splunk_url` | Splunk HEC URL |
+| `splunk_token` | Splunk HEC token |
+| `es_url` | Elasticsearch cluster URL |
+| `es_index` | Elasticsearch index |
+| `es_user` | Elasticsearch username |
+| `es_pass` | Elasticsearch password |
 
-The GitHub Action is built using Vercel's ncc compiler to create a single JavaScript file in the `dist/` directory:
+### Advanced
 
-```bash
-npm run build
+| Input | Default | Description |
+|-------|---------|-------------|
+| `print_only` | `false` | Print events to log only — skip upload to O3 backend |
+| `debug` | `false` | Verbose debug logging |
+| `docker_image` | `public.ecr.aws/f9o7b7m0/roc` | Override the ROC Docker image (air-gapped environments) |
+
+---
+
+## How block mode works
+
+When `policy: block`, the DPI binary applies iptables rules to the runner:
+
+```
+O3SECURITY-EGRESS chain (jumps from OUTPUT):
+  1. ACCEPT tcp dpt:22          ← SSH always allowed (no lockout)
+  2. ACCEPT tcp spt:22          ← SSH replies
+  3. ACCEPT on lo               ← Loopback
+  4. ACCEPT ESTABLISHED,RELATED ← Don't break in-flight sessions
+  5. ACCEPT dst=<allowlisted>   ← Your allowed_domains/ips/cidrs
+  ...
+  N. DROP tcp dpt:80            ← Block outbound HTTP
+  N. DROP tcp dpt:443           ← Block outbound HTTPS
 ```
 
-This command compiles the `index.js` file and all its dependencies into a single file in the `dist/` directory that can be used in GitHub Actions.
+Rules are **removed on job completion** via a deferred cleanup — even on error paths or panics.
 
-## Security Considerations
+---
 
-- Store your API key in GitHub Secrets and never commit it to your repository
-- Review patterns carefully to ensure they don't cause false positives in your environment
-- Monitor the Docker container's behavior and logs during execution
-- Ensure SSL libraries are properly configured for secure communication
+## Comparison vs Step Security Harden Runner
 
-## Troubleshooting
-
-### Common Issues
-
-1. **Docker not available**: Make sure your GitHub Actions runner has Docker available.
-2. **SSL Library Issues**: Verify SSL library paths and versions match your runner's configuration.
-3. **API Key Errors**: Double-check that your API key is correctly set in GitHub Secrets.
-
-### Getting Logs
-
-To see detailed logs from the ROC container:
-```yaml
-- name: Run ROC Analysis
-  id: roc
-  uses: secai/roc-agent@v1
-  with:
-    # your configuration
-- name: Print ROC Logs
-  run: |
-    echo "Container Logs:"
-    echo "${{ steps.roc.outputs.logs }}"
-```
-
-## License
-
-This project is licensed under the terms provided by SecurableAI.
-
-## Maintainers
-
-- SecurableAI
-
-## Contributing
-
-Contributions are welcome! Please see our contributing guidelines for more information.
+| Feature | ROC Agent | Step Security Harden Runner |
+|---------|-----------|----------------------------|
+| No account required | ✅ (`policy: audit/block`) | ❌ |
+| Egress block mode | ✅ iptables | ✅ |
+| TLS plaintext inspection | ✅ eBPF uprobe | ❌ |
+| Secret detection in traffic | ✅ | ❌ |
+| Per-step event correlation | ✅ | Limited |
+| Custom patterns | ✅ YAML file | ❌ |
+| SIEM integration | ✅ Splunk / Elasticsearch | ❌ |
+| SSH lockout protection | ✅ Guaranteed | ✅ |
