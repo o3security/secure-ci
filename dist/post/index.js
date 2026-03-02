@@ -39420,7 +39420,8 @@ const { execSync } = __nccwpck_require__(5317);
 const axios = __nccwpck_require__(7269);
 // Note: baseline analysis is now done via IngestCIBaseline GraphQL mutation (no REST import needed)
 
-const FIM_LOG_PATH = "/tmp/roc-fim-events.jsonl";
+// Note: all vuln creation is handled by the Go binary via IngestCIBaseline.
+
 
 // ----------------------------------------------------------------
 // Helpers
@@ -39553,34 +39554,15 @@ async function getContainerStats(containerId) {
   }
 }
 
-// ----------------------------------------------------------------
-// FIM event reader + uploader
-// ----------------------------------------------------------------
-async function readFIMEvents() {
-  try {
-    if (!(await fs.pathExists(FIM_LOG_PATH))) return [];
-    const content = await fs.readFile(FIM_LOG_PATH, "utf8");
-    const events = [];
-    for (const line of content.split("\n")) {
-      const t = line.trim();
-      if (!t) continue;
-      try { events.push(JSON.parse(t)); } catch { /* skip malformed */ }
-    }
-    return events;
-  } catch (e) {
-    core.warning(`[FIM] Error reading fim-events log: ${e.message}`);
-    return [];
-  }
-}
-
-// Note: All vuln creation (secrets + deviations + FIM) is now handled by the
+// Note: All vuln creation (secrets + deviations) is now handled by the
 // Go binary at shutdown via IngestCIBaseline. post.js is read-only: it queries
 // stats and writes the GitHub Step Summary only.
+
 
 // ----------------------------------------------------------------
 // GitHub Step Summary writer
 // ----------------------------------------------------------------
-async function writeStepSummary(stats, egressPolicy, containerId, baselineReport, fimEvents) {
+async function writeStepSummary(stats, egressPolicy, containerId, baselineReport) {
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (!summaryPath) {
     core.debug("GITHUB_STEP_SUMMARY not set, skipping summary write.");
@@ -39691,23 +39673,6 @@ ${destRows}
   }
 
 
-  // FIM violations section
-  let fimSection = "";
-  if (fimEvents && fimEvents.length > 0) {
-    alertIcon = alertIcon === "✅" ? "🔍" : alertIcon;
-    const rows = fimEvents.slice(0, 20).map(e =>
-      `| \`${e.path || "-"}\` | ${e.action || "?"} | ${e.step_name || "-"} | \`${(e.sha256 || "").slice(0, 12)}…\` |`
-    ).join("\n");
-    const more = fimEvents.length > 20 ? `\n> _…and ${fimEvents.length - 20} more events_` : "";
-    fimSection = `
-### 🔍 File Integrity Violations (${fimEvents.length})
-
-| File | Action | Step | SHA256 (after) |
-|------|--------|------|----------------|
-${rows}${more}
-`;
-  }
-
   // Captured connections section — shows supply chain process context
   let capturesSection = "";
   const captureEvents = stats?.egress_events || [];
@@ -39750,12 +39715,8 @@ ${rows}${more}
 | TLS/SSL connections captured | **${tlsCount}** |
 | Unique egress destinations | **${uniqueDests}** |
 | Connections blocked | **${blockedCount}** |
-| FIM file violations | **${fimEvents ? fimEvents.length : '-'}** |
 | Egress policy | \`${egressPolicy || 'audit'}\` |
 
-${secretSection}
-${egressSection}
-${fimSection}
 ${capturesSection}
 ${baselineSection}
 ---
@@ -39836,7 +39797,6 @@ async function cleanup() {
     "/tmp/roc-stdout.log",
     "/tmp/roc-stderr.log",
     "/tmp/roc-egress-log.jsonl",
-    "/tmp/roc-fim-events.jsonl",
     "/tmp/roc-summary.json",
     "/tmp/roc-inline-policy.yaml",
     "/tmp/roc-inline-patterns.yaml",
@@ -39857,25 +39817,8 @@ async function cleanup() {
   core.info("════════════════════════════════════════");
 
 
-  // 4. Read FIM events — passed to uploadPipelineVuln as fallback until binary ships FIM upload in Docker image
-  const fimEvents = await readFIMEvents();
-  if (fimEvents.length > 0) {
-    core.warning(`[FIM] ⚠️  ${fimEvents.length} file integrity violation(s) detected during build!`);
-    core.info('\n🔍 File Integrity Violations:');
-    core.info('─'.repeat(60));
-    fimEvents.slice(0, 20).forEach(e => {
-      const proc = e.comm ? ` [${e.comm}]` : '';
-      const action = e.action || e.event_type || 'modified';
-      core.info(`  🔍 ${action.toUpperCase()} ${e.path || e.filename || '?'}${proc}`);
-    });
-    if (fimEvents.length > 20) core.info(`  … and ${fimEvents.length - 20} more FIM events`);
-    core.info('─'.repeat(60));
-    // Binary now handles FIM upload via UploadFIMFindings at SIGTERM shutdown.
-    // uploadPipelineVuln below will include fim_events as a fallback.
-  }
-
-  // 5. Run CI baseline analysis via GraphQL (IngestCIBaseline)
-  //    Sends all egress destinations + FIM events observed this run.
+  // 4. Run CI baseline analysis via GraphQL (IngestCIBaseline)
+  //    Sends all egress destinations observed this run.
   //    Backend tracks learning/active phase and creates deviation vulns.
   let baselineReport = null;
   if (core.getInput("baseline_enabled") !== "false" && apiKey) {
@@ -39911,28 +39854,19 @@ async function cleanup() {
       // For now we rely on egress-interceptor JSONL for host-side egress.
       // When binary sends all flows (not just secret ones), this will auto-populate.
 
-      const fimObs = fimEvents.map(e => ({
-        key: e.path || e.filename || e.key || null,
-        path: e.path || e.filename || null,
-        event_type: e.event_type || e.type || 'write',
-        severity: e.severity || 'medium',
-        comm: e.comm || null, cmdline: e.cmdline || null,
-        parent_comm: e.parent_comm || null,
-      })).filter(o => o.key);
-
       const gqlEndpoint = serverUrl.endsWith('/graphql') ? serverUrl : `${serverUrl.replace(/\/$/, '')}/graphql`;
       const ingestMutation = `
         mutation IngestCIBaseline(
           $project_name: String, $session_id: String,
           $repo: String!, $job: String!, $branch: String!, $run_id: String!,
           $run_number: String, $workflow: String, $actor: String, $sha: String,
-          $egress: JSON, $fim_events: JSON, $allowed_domains: [String]
+          $egress: JSON, $allowed_domains: [String]
         ) {
           IngestCIBaseline(
             project_name: $project_name session_id: $session_id
             repo: $repo job: $job branch: $branch run_id: $run_id
             run_number: $run_number workflow: $workflow actor: $actor sha: $sha
-            egress: $egress fim_events: $fim_events allowed_domains: $allowed_domains
+            egress: $egress allowed_domains: $allowed_domains
           ) {
             status phase run_count observations deviations new_destinations vuln_id
           }
@@ -39947,14 +39881,14 @@ async function cleanup() {
         }
       } catch (_) { }
 
-      core.info(`[Baseline] ${egressDestinations.length} egress connections, ${fimObs.length} FIM events to process`);
+      core.info(`[Baseline] ${egressDestinations.length} egress connections to process`);
       core.info(`[Baseline] ${new Set(egressDestinations.map(d => d.key)).size} unique egress destinations after dedup`);
 
-      // If post.js has NO egress data (binary captures inside Docker → JSONL empty) AND no FIM events,
+      // If post.js has NO egress data (binary captures inside Docker → JSONL empty),
       // the binary already called IngestCIBaseline at shutdown with the real observations.
       // Skip the call to avoid creating a duplicate run with 0 observations.
       // Instead, query the latest baseline run to get the real stats for step summary.
-      if (egressDestinations.length === 0 && fimObs.length === 0) {
+      if (egressDestinations.length === 0) {
         core.info('[Baseline] No host-side egress data — binary already ingested via FlushEgressBaseline. Querying latest run for stats.');
         try {
           const runCtx = stepCtx.repository || process.env.GITHUB_REPOSITORY || '';
@@ -40065,7 +39999,7 @@ async function cleanup() {
           core.debug(`[Baseline] Could not query latest run: ${qErr.message}`);
         }
       } else {
-        // Host-side egress or FIM data available — call IngestCIBaseline directly
+        // Host-side egress data available — call IngestCIBaseline directly
         const ref = stepCtx.ref || process.env.GITHUB_REF || '';
         const branchName = stepCtx.branch
           || process.env.GITHUB_REF_NAME
@@ -40086,7 +40020,6 @@ async function cleanup() {
             actor: stepCtx.actor || process.env.GITHUB_ACTOR || '',
             sha: stepCtx.sha || process.env.GITHUB_SHA || '',
             egress: egressDestinations,
-            fim_events: fimObs,
             allowed_domains: (core.getInput('allowed_domains') || '')
               .split('\n')
               .map(l => l.trim())
@@ -40139,7 +40072,7 @@ async function cleanup() {
     };
     core.info(`[SummaryStat] Synthesized: ${baselineReport.observations} connections, ${stats.secrets_found} secret(s)`);
   }
-  await writeStepSummary(stats, egressPolicy, containerId, baselineReport, fimEvents);
+  await writeStepSummary(stats, egressPolicy, containerId, baselineReport);
 
   // 7. Warn on secrets (binary already created the vuln via IngestCIBaseline at shutdown)
   if (stats && stats.secrets_found > 0) {
