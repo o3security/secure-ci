@@ -39756,12 +39756,13 @@ async function cleanup() {
     if (rocPid) {
       core.info(`Sending SIGINT to ROC process PID: ${rocPid}`);
       try { await exec.exec("sudo", ["kill", "-SIGINT", rocPid]); } catch (_) { }
-      await sleep(3000);
+      // Wait long enough for the binary to complete IngestCIBaseline HTTP call (~8s timeout)
+      await sleep(10000);
     }
-    // 2. Stop container
+    // 2. Stop container — give 20s grace period so binary can finish flushing
     if (containerId) {
       core.info(`Stopping ROC container: ${containerId}`);
-      try { await exec.exec("sudo", ["docker", "stop", "--time=5", containerId]); } catch (_) { }
+      try { await exec.exec("sudo", ["docker", "stop", "--timeout=20", containerId]); } catch (_) { }
     }
   } catch (e) {
     core.warning(`Error during ROC stop: ${e.message}`);
