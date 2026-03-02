@@ -15,13 +15,11 @@ const http = require('http');
 const path = require('path');
 
 const LOG_PATH = process.argv[2] || '/tmp/roc-egress-log.jsonl';
-const FIM_LOG_PATH = process.argv[3] || '/tmp/roc-fim-events.jsonl';
-const WORKSPACE = process.argv[4] || process.env.GITHUB_WORKSPACE || '';
 
 // Ensure log file exists
 try { fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true }); } catch (_) { }
 try { if (!fs.existsSync(LOG_PATH)) fs.writeFileSync(LOG_PATH, ''); } catch (_) { }
-try { if (!fs.existsSync(FIM_LOG_PATH)) fs.writeFileSync(FIM_LOG_PATH, ''); } catch (_) { }
+
 
 const seen = new Set();
 
@@ -141,48 +139,8 @@ http.request = function patchedHttpRequest(url, options, callback) {
     return origHttpRequest.apply(this, arguments);
 };
 
-// ── FIM watcher (if workspace provided) ─────────────────────────────────────
-if (WORKSPACE && fs.existsSync(WORKSPACE)) {
-    try {
-        const chokidar = require('chokidar');
-        chokidar.watch(WORKSPACE, {
-            ignoreInitial: true,
-            ignored: [
-                /node_modules/,
-                /\.git/,
-                /\.(log|tmp)$/,
-            ],
-            persistent: true,
-            depth: 5,
-        }).on('change', (filePath) => {
-            const event = {
-                timestamp: new Date().toISOString(),
-                path: filePath,
-                action: 'MODIFIED',
-                step_name: process.env.GITHUB_ACTION || '',
-                job: process.env.GITHUB_JOB || '',
-                source: 'node-interceptor',
-            };
-            try { fs.appendFileSync(FIM_LOG_PATH, JSON.stringify(event) + '\n'); } catch (_) { }
-        }).on('add', (filePath) => {
-            const event = {
-                timestamp: new Date().toISOString(),
-                path: filePath,
-                action: 'CREATED',
-                step_name: process.env.GITHUB_ACTION || '',
-                job: process.env.GITHUB_JOB || '',
-                source: 'node-interceptor',
-            };
-            try { fs.appendFileSync(FIM_LOG_PATH, JSON.stringify(event) + '\n'); } catch (_) { }
-        });
-        process.stderr.write(`[roc-interceptor] FIM watching: ${WORKSPACE}\n`);
-    } catch (_) {
-        // chokidar unavailable — skip FIM
-        process.stderr.write('[roc-interceptor] chokidar not available, FIM disabled\n');
-    }
-}
-
 process.stderr.write('[roc-interceptor] Node.js egress interceptor running\n');
+
 
 // Keep alive
 setInterval(() => { }, 60000);

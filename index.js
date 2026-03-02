@@ -79,9 +79,7 @@ async function run() {
       "-v", "/opt:/opt:ro",
       "-v", "/snap:/snap:ro",
       "-v", "/root:/root:ro",
-      "-v", "/tmp:/tmp",          // shares /tmp/roc-step-context.json + policy YAML + fim-log
-      // Mount the workspace at the SAME path so inotify can watch host source files
-      // (without this the GITHUB_WORKSPACE path doesn't exist inside the container)
+      "-v", "/tmp:/tmp",          // shares /tmp/roc-step-context.json + policy YAML
       // CI/CD env vars for event tagging
       "-e", `GITHUB_REPOSITORY=${stepContext.repository}`,
       "-e", `GITHUB_RUN_ID=${stepContext.run_id}`,
@@ -128,22 +126,6 @@ async function run() {
     // Secret scanning patterns
     if (patterns) dockerArgs.push("--pattern", await resolvePatterns(patterns));
 
-    // File integrity monitoring
-    // Mount the workspace at the SAME path so the binary's inotify can watch host files.
-    // The root filesystem is mounted at /host:ro, but the binary uses the original path
-    // directly — so we need an explicit rw bind-mount of the workspace.
-    const workspace = process.env.GITHUB_WORKSPACE;
-    if (workspace) {
-      // Insert the volume mount BEFORE the image name in dockerArgs
-      // (dockerArgs already has the image at position -3 from end: [image, "all", "-m", "text"])
-      const imgIdx = dockerArgs.indexOf(dockerImage);
-      if (imgIdx !== -1) {
-        dockerArgs.splice(imgIdx, 0, "-v", `${workspace}:${workspace}:rw`);
-      }
-      dockerArgs.push("--workspace", workspace);
-      core.info(`[FIM] Watching workspace: ${workspace}`);
-    }
-    dockerArgs.push("--fim-log", "/tmp/roc-fim-events.jsonl");
 
     // Egress log for automated baseline (post.js reads this)
     dockerArgs.push("--egress-log", "/tmp/roc-egress-log.jsonl");
@@ -184,7 +166,7 @@ async function run() {
     // Pre-create shared /tmp log files with world-writable perms so the binary
     // inside Docker can write to them (binary runs as root, but files created by
     // a previous run may be owned by runner user with 644 → EACCES).
-    for (const logFile of ['/tmp/roc-fim-events.jsonl', '/tmp/roc-egress-log.jsonl']) {
+    for (const logFile of ['/tmp/roc-egress-log.jsonl']) {
       try {
         // Truncate existing file or create new one, then set 666 so any user can write
         const fd = require('fs').openSync(logFile, 'w');
@@ -223,11 +205,11 @@ async function run() {
       const iOut = fs.openSync('/tmp/roc-interceptor.log', 'a');
       const interceptorProc = spawn(
         process.execPath,
-        [interceptorPath, '/tmp/roc-egress-log.jsonl', '/tmp/roc-fim-events.jsonl', workspace || ''],
+        [interceptorPath, '/tmp/roc-egress-log.jsonl'],
         {
           detached: true,
           stdio: ['ignore', iOut, iOut],
-          env: { ...process.env, GITHUB_WORKSPACE: workspace || '' },
+          env: { ...process.env },
         }
       );
       interceptorProc.unref();

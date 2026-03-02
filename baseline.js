@@ -20,8 +20,8 @@ const { default: axios } = require('axios');
 const path = require('path');
 
 const EGRESS_LOG_PATH = '/tmp/roc-egress-log.jsonl';
-const FIM_LOG_PATH = '/tmp/roc-fim-events.jsonl';
 const BASELINE_CACHE_PATH = '/tmp/roc-baseline-cache.json';
+
 
 // ─── Known-safe registries + CDNs (auto-downgrade to "info") ──────────────────
 
@@ -156,28 +156,6 @@ async function classifyEgress(entry) {
     return { severity: 'medium', severity_reason: 'unknown_domain' };
 }
 
-// ─── FIM severity classifier ──────────────────────────────────────────────────
-
-function classifyFIM(event) {
-    const path = (event.path || '').toLowerCase();
-    const step = (event.step_name || '').toLowerCase();
-    const action = (event.action || '').toUpperCase();
-
-    const isInstallStep = /npm install|pip install|yarn install|go mod|bundle install|apt-get|apt install/i.test(step);
-    const isSourceFile = /\.(js|ts|jsx|tsx|py|go|java|rb|sh|bash)$/.test(path);
-    const isLockFile = /\.(lock|sum)$|package-lock\.json|yarn\.lock|pipfile\.lock/i.test(path);
-    const isConfigFile = /\.(yaml|yml|toml|json)$/.test(path);
-    const isBuildArtifact = /^\/(dist|build|target|__pycache__|\.venv)\//.test('/' + path.split('/').slice(1).join('/'));
-
-    if (isBuildArtifact) return { severity: 'low', severity_reason: 'build_artifact' };
-    if (isSourceFile && isInstallStep) return { severity: 'high', severity_reason: 'source_during_install' };
-    if (isSourceFile && action === 'MODIFIED') return { severity: 'high', severity_reason: 'source_modified' };
-    if (isLockFile && isInstallStep) return { severity: 'medium', severity_reason: 'lockfile_during_install' };
-    if (isLockFile) return { severity: 'medium', severity_reason: 'lockfile_modified' };
-    if (isConfigFile && isInstallStep) return { severity: 'high', severity_reason: 'config_during_install' };
-    return { severity: 'medium', severity_reason: 'file_modified' };
-}
-
 // ─── Log readers ──────────────────────────────────────────────────────────────
 
 async function readJSONL(path) {
@@ -257,13 +235,10 @@ async function runIngest(apiKey, serverUrl) {
     const run_number = process.env.GITHUB_RUN_NUMBER || null;
     const workflow = process.env.GITHUB_WORKFLOW || '';
 
-    // Read raw logs
-    const [egressRaw, fimRaw] = await Promise.all([
-        readJSONL(EGRESS_LOG_PATH),
-        readJSONL(FIM_LOG_PATH),
-    ]);
+    // Read egress log
+    const egressRaw = await readJSONL(EGRESS_LOG_PATH);
+    core.info(`[Baseline] ${egressRaw.length} egress connections to process`);
 
-    core.info(`[Baseline] ${egressRaw.length} egress connections, ${fimRaw.length} FIM events to process`);
 
     // Deduplicate by domain:port:comm — same endpoint from different processes
     // (e.g. npm + curl both hitting registry.npmjs.org) logs as separate supply-chain events.
@@ -302,23 +277,11 @@ async function runIngest(apiKey, serverUrl) {
         })
     );
 
-    // Classify FIM
-    const fimClassified = fimRaw.map(e => {
-        const { severity, severity_reason } = classifyFIM(e);
-        const key = `${e.path || 'unknown'}::${e.step_name || 'unknown'}`;
-        return {
-            key, severity, severity_reason,
-            sha256: e.sha256 || null,
-            before_sha256: e.before_sha256 || null,
-        };
-    });
-
     // Send to backend
     try {
         const resp = await axios.post(`${base}/api/v1/roc/ingest`, {
             repo, job, branch, run_id, run_number, workflow,
             egress: egressClassified,
-            fim_events: fimClassified,
         }, {
             headers: { Authorization: `apiKey ${apiKey}`, 'Content-Type': 'application/json' },
             timeout: 20000,
@@ -340,10 +303,9 @@ async function runIngest(apiKey, serverUrl) {
             phase: result.phase,
             deviations: result.deviations,
             high_severity_deviations: highCritical,
-            newDestinations: highCritical.map(d => d.key || d),   // ← was missing, crashed post.js
+            newDestinations: highCritical.map(d => d.key || d),
             run_count: result.run_count,
             egressClassified,
-            fimClassified,
             firstRun: result.run_count === 1,
             storedIn: 'backend+cache',
         };
@@ -367,7 +329,6 @@ async function runBaselineAnalysis(apiKey, serverUrl) {
 module.exports = {
     runBaselineAnalysis,
     classifyEgress,
-    classifyFIM,
     isKnownRegistry,
     isPrivateIP,
     isRawIP,
