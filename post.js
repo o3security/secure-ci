@@ -457,7 +457,9 @@ ${(stats.blocked_details || []).map(b =>
     const phase = baselineReport.phase || 'learning';
 
     const untrustedEntries = egressEntries.filter(e => e.status === 'untrusted');
+    const newEntries = egressEntries.filter(e => e.status === 'new');
     if (untrustedEntries.length > 0) alertIcon = '🚨';
+    if (newEntries.length > 0 && alertIcon === '✅') alertIcon = '⚠️';
     if (newDestsArr.length > 0 && alertIcon === '✅') alertIcon = '⚠️';
 
     // Process tree: parent_comm → comm
@@ -467,9 +469,9 @@ ${(stats.blocked_details || []).map(b =>
       return '–';
     };
 
-    // Build a row for every entry, sorted NEW-first then UNTRUSTED
+    // Build a row for every entry, sorted NEW-first then UNTRUSTED then rest
     const sorted = [...egressEntries].sort((a, b) => {
-      const rank = (e) => newDestsSet.has(e.key) ? 0 : e.status === 'untrusted' ? 1 : 2;
+      const rank = (e) => newDestsSet.has(e.key) || e.status === 'new' ? 0 : e.status === 'untrusted' ? 1 : 2;
       return rank(a) - rank(b);
     });
 
@@ -479,9 +481,11 @@ ${(stats.blocked_details || []).map(b =>
           ? '⚠️ **NEW**'
           : e.status === 'untrusted'
             ? '🚫 **Untrusted**'
-            : e.status === 'trusted'
-              ? '✅ trusted'
-              : '🔵 baseline';
+            : e.status === 'new'
+              ? '⚠️ **NEW** (first seen)'
+              : e.status === 'trusted'
+                ? '✅ trusted'
+                : '🔵 baseline';
         const count = e.occurrence_count > 1 ? ` ×${e.occurrence_count}` : '';
         return `| \`${e.key}\`${count} | ${procTree(e)} | ${badge} |`;
       }).join('\n')
