@@ -305,7 +305,7 @@ ${rows}${more}
 ${capturesSection}
 ${baselineSection}
 ---
-🛡️ Powered by [O3 Security ROC Agent](https://github.com/o3security/roc-agent)  
+🛡️ Powered by [O3 Security ROC Agent](https://github.com/o3security/roc-agent)
 [View full analysis →](${dashboardUrl})
 `;
 
@@ -375,7 +375,7 @@ async function cleanup() {
   // Docker logs from our container
   if (containerId) {
     try {
-      const dockerLogs = execSync(`sudo docker logs --tail 100 ${containerId} 2>&1`, { encoding: "utf8" });
+      const dockerLogs = execSync(`sudo docker logs ${containerId} 2>&1`, { encoding: "utf8" });
       core.info(`── docker logs (${containerId}) ──`);
       core.info(dockerLogs || "(empty)");
     } catch (e) { core.info(`docker logs error: ${e.message}`); }
