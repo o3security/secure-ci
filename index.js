@@ -325,6 +325,12 @@ async function startKayoContainer({ image, apiKey, serverUrl, projectName, print
 
   // Tetragon's gRPC server (:54321) and health server (:6789) both default to
   // ports that may collide with other services on the runner. Override to be safe.
+  // Volume set matches the production tetragon daemonset (see
+  // examples/kayo-rules/deploy/daemonset.yaml in the tetragon repo). Without
+  // /sys/fs/cgroup tetragon spams "Cgroup deployment mode unknown" and
+  // disables advanced cgroup tracking; without an explicit BTF mount tetragon
+  // can fail on runner images where /sys/kernel/btf/vmlinux is missing or at
+  // a non-default path.
   const args = [
     'run', '-d',
     '--name', 'kayo',
@@ -333,12 +339,20 @@ async function startKayoContainer({ image, apiKey, serverUrl, projectName, print
     '--network=host',
     '-v', '/sys/fs/bpf:/sys/fs/bpf',
     '-v', '/sys/kernel/debug:/sys/kernel/debug',
+    '-v', '/sys/fs/cgroup:/sys/fs/cgroup:ro',
+    '-v', '/sys/kernel/btf/vmlinux:/sys/kernel/btf/vmlinux:ro',
+    '-v', '/proc:/procRoot:ro',
     '-v', '/tmp/kayo-events:/var/log/kayo',
     image,
     '/usr/bin/tetragon',
+    '--bpf-lib=/var/lib/tetragon/',
+    '--procfs=/procRoot',
     '--health-server-address=:7789',
     '--server-address=localhost:54322',
     '--bpf-dir=tetragon-kayo',
+    '--enable-tracing-policy-crd=false',
+    '--enable-pod-info=false',
+    '--release-pinned-bpf=true',
     '--kayo-report-file=/var/log/kayo/events.jsonl',
     '--kayo-workers=8',
   ];
@@ -393,28 +407,59 @@ async function startKayoContainer({ image, apiKey, serverUrl, projectName, print
   // which the UI clips at ~4KB — that's why the multi-KB tetragon config
   // dump showed up cut off as "...export-file-compress:fal" in earlier runs).
   core.warning(`⚠️ KAYO container is not running (status: ${finalStatus || 'unknown'})`);
-  core.info('────────── KAYO docker logs (full) ──────────');
+  let logsText = '';
   try {
-    const logs = execSync(`sudo docker logs ${containerId} 2>&1`, {
+    logsText = execSync(`sudo docker logs ${containerId} 2>&1`, {
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
     });
-    if (logs.trim()) {
-      for (const line of logs.split('\n')) core.info(line);
-    } else {
-      core.info('(no container output)');
-    }
   } catch (e) {
     core.info(`could not read logs: ${e.message}`);
   }
+  core.info('────────── KAYO docker logs (full) ──────────');
+  if (logsText.trim()) {
+    for (const line of logsText.split('\n')) core.info(line);
+  } else {
+    core.info('(no container output)');
+  }
   core.info('────────── end KAYO docker logs ──────────');
 
-  // Also surface the kernel-feature exit reason for the GitHub Actions runner
-  // case: ubuntu-latest runners gate /sys/kernel/debug and some BPF features.
-  core.info('[KAYO] If exit=255, common causes on GitHub-hosted runners:');
-  core.info('       - /sys/kernel/debug not mounted (need privileged + that volume)');
-  core.info('       - kernel BTF missing (some runner images strip it)');
-  core.info('       - api_key/project_name has no rules registered on the backend');
+  // Parse the actual fatal line and give a targeted hint. tetragon logs the
+  // fatal as: level=error msg="Failed to execute tetragon" error="<reason>"
+  const fatalMatch = logsText.match(/level=error msg="Failed to execute tetragon" error="([^"]+)"/);
+  const fatal = fatalMatch ? fatalMatch[1] : '';
+  if (fatal) core.warning(`[KAYO] fatal: ${fatal}`);
+  const hint = diagnoseKayoFatal(fatal, logsText);
+  if (hint) core.info(`[KAYO] hint: ${hint}`);
+}
+
+// diagnoseKayoFatal maps the most common tetragon/kayo startup failures to
+// a one-line operator hint. Returns "" when nothing matches.
+function diagnoseKayoFatal(fatal, logs) {
+  if (!fatal && !logs) return '';
+  const f = (fatal || '').toLowerCase();
+  if (f.includes('insufficient permissions') || f.includes('read_runtime')) {
+    return 'The provided api_key is missing the READ_RUNTIME scope on the backend. Grant the key access to runtime security rules for this project.';
+  }
+  if (f.includes('fetch rules') && f.includes('no rules')) {
+    return 'The project has no runtime security rules registered on the backend. Add rules in the O3 Security dashboard for project_name then re-run.';
+  }
+  if (f.includes('btf')) {
+    return 'BTF (kernel type info) is missing on the runner. The mount of /sys/kernel/btf/vmlinux is required and the kernel must expose it.';
+  }
+  if (f.includes('failed to load') && f.includes('bpf')) {
+    return 'BPF program load rejected by the kernel verifier. Check the runner kernel version; tetragon needs ≥5.10.';
+  }
+  if (f.includes('bind: address already in use') || f.includes('listen tcp')) {
+    return 'A port collision (gRPC :54322 or health :7789). Likely another tetragon process on the runner — should not normally happen on hosted runners.';
+  }
+  if (f.includes('permission denied') && f.includes('/sys/fs/bpf')) {
+    return '/sys/fs/bpf is not writable. Ensure --privileged and that the host has the BPF filesystem mounted.';
+  }
+  if (logs.includes('debugfs') && logs.includes('not mounted')) {
+    return '/sys/kernel/debug is not mounted on the host. KAYO needs it for some kprobe attach paths.';
+  }
+  return '';
 }
 
 /**
