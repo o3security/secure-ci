@@ -39777,26 +39777,49 @@ async function cleanup() {
   // don't outlive the runner and fire against recycled PIDs on subsequent jobs.
   const kayoContainerId = core.getState("kayoContainerId") || "";
   if (kayoContainerId) {
-    core.info(`KAYO: stopping runtime security container ${kayoContainerId.slice(0, 12)}`);
+    // Check whether the container is still running before signalling — if it
+    // crashed during startup (eg. backend rejected the api_key) trying to
+    // SIGTERM it produces a noisy "is not running" error from dockerd.
+    let kayoRunning = false;
     try {
-      await exec.exec("sudo", ["docker", "kill", "-s", "SIGTERM", kayoContainerId]);
-      await sleep(5000);
-      await exec.exec("sudo", ["docker", "stop", "--timeout=30", kayoContainerId]);
-    } catch (e) {
-      core.warning(`KAYO: error during stop: ${e.message}`);
+      const status = execSync(
+        `sudo docker inspect --format='{{.State.Status}}' ${kayoContainerId} 2>/dev/null`,
+        { encoding: "utf8" }
+      ).trim();
+      kayoRunning = (status === "running");
+    } catch (_) { /* container may have been pruned */ }
+
+    if (kayoRunning) {
+      core.info(`KAYO: stopping runtime security container ${kayoContainerId.slice(0, 12)}`);
+      try {
+        await exec.exec("sudo", ["docker", "kill", "-s", "SIGTERM", kayoContainerId]);
+        await sleep(5000);
+        await exec.exec("sudo", ["docker", "stop", "--timeout=30", kayoContainerId]);
+      } catch (e) {
+        core.warning(`KAYO: error during stop: ${e.message}`);
+      }
+    } else {
+      core.info(`KAYO: container ${kayoContainerId.slice(0, 12)} already exited — skipping kill/stop`);
     }
-    // Print KAYO container logs and the event JSONL so detections show up in the workflow output.
+    // Print KAYO container logs and the event JSONL so detections show up in
+    // the workflow output. maxBuffer bump (16MiB) avoids ENOBUFS on chatty
+    // runs — tetragon dumps a multi-KB config block at startup.
     try {
-      const kLogs = execSync(`sudo docker logs ${kayoContainerId} 2>&1 | tail -200`, { encoding: "utf8" });
+      const kLogs = execSync(`sudo docker logs ${kayoContainerId} 2>&1`, {
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      const lines = kLogs.split("\n");
+      const tail = lines.slice(-200).join("\n");
       core.info("── KAYO container logs (tail 200) ──");
-      core.info(kLogs || "(empty)");
+      for (const l of tail.split("\n")) core.info(l);
     } catch (e) { core.info(`KAYO docker logs error: ${e.message}`); }
     try {
       if (await fs.pathExists("/tmp/kayo-events/events.jsonl")) {
         const events = await fs.readFile("/tmp/kayo-events/events.jsonl", "utf8");
         const count = events.trim() ? events.trim().split("\n").length : 0;
         core.info(`── KAYO detection events (${count}) ──`);
-        core.info(events.trim() || "(no detections)");
+        for (const l of (events.trim() || "(no detections)").split("\n")) core.info(l);
       } else {
         core.info("── KAYO event log: NOT FOUND at /tmp/kayo-events/events.jsonl");
       }
@@ -39814,15 +39837,22 @@ async function cleanup() {
 
   // Docker container status
   try {
-    const psOut = execSync("sudo docker ps -a --format 'table {{.ID}}\\t{{.Image}}\\t{{.Status}}\\t{{.Names}}' 2>&1", { encoding: "utf8" });
+    const psOut = execSync("sudo docker ps -a --format 'table {{.ID}}\\t{{.Image}}\\t{{.Status}}\\t{{.Names}}' 2>&1", {
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    });
     core.info("── docker ps -a ──");
     core.info(psOut || "(empty)");
   } catch (e) { core.info(`docker ps error: ${e.message}`); }
 
-  // Docker logs from our container
+  // Docker logs from our container — large maxBuffer avoids ENOBUFS on a
+  // chatty ROC container (ecapture can write tens of MB of TLS records).
   if (containerId) {
     try {
-      const dockerLogs = execSync(`sudo docker logs ${containerId} 2>&1`, { encoding: "utf8" });
+      const dockerLogs = execSync(`sudo docker logs ${containerId} 2>&1`, {
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+      });
       core.info(`── docker logs (${containerId}) ──`);
       core.info(dockerLogs || "(empty)");
     } catch (e) { core.info(`docker logs error: ${e.message}`); }
