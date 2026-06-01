@@ -99,6 +99,7 @@ async function run() {
       dockerImage,
       "all",
       "-m", "text",
+      "--dest"
     ];
 
     // Add API credentials if provided
