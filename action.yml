@@ -120,7 +120,7 @@ outputs:
     description: "Container ID of the KAYO runtime security agent (empty when runtime_security=false)"
 
 runs:
-  using: "node20"
+  using: "node24"
   main: "dist/index.js"
   post: "dist/post/index.js"
 
