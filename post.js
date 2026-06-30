@@ -126,6 +126,74 @@ async function readSummaryStats(apiKey, serverUrl) {
 }
 
 
+// ----------------------------------------------------------------
+// Threat-intel enrichment of egress destinations
+// ----------------------------------------------------------------
+// Collects the unique outbound destinations this run contacted and scores them
+// against the central reputation service (ipinfo.o3.security/api/v1/reputation),
+// which fuses URLhaus + ThreatFox + RDAP + geo/ASN behind a shared cache. This
+// catches exfil to known C2 / malware hosts / Tor / freshly-registered domains —
+// the signal a behavioral-only egress log can't see. Fully fail-open: any error
+// or timeout returns no findings and never fails the build.
+const REPUTATION_API_BASE = process.env.REPUTATION_API_BASE || "https://ipinfo.o3.security";
+
+async function collectEgressDestinations() {
+  const dests = new Set();
+  try {
+    const EGRESS_LOG = "/tmp/roc-egress-log.jsonl";
+    if (await fs.pathExists(EGRESS_LOG)) {
+      const content = await fs.readFile(EGRESS_LOG, "utf8");
+      for (const line of content.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const e = JSON.parse(line);
+          const d = (e.domain || e.ip || "").trim();
+          // Skip loopback/private — they can't be enriched and aren't exfil targets.
+          if (d && !d.startsWith("127.") && !d.startsWith("10.") &&
+              !d.startsWith("192.168.") && d !== "localhost" && d !== "::1") {
+            dests.add(d.toLowerCase());
+          }
+        } catch { /* skip malformed line */ }
+      }
+    }
+  } catch (e) {
+    core.debug(`[Reputation] Could not read egress log: ${e.message}`);
+  }
+  return [...dests];
+}
+
+async function enrichDestinations(destinations) {
+  if (!destinations || destinations.length === 0) return [];
+  const malicious = [];
+  const url = `${REPUTATION_API_BASE.replace(/\/$/, "")}/api/v1/reputation/batch`;
+  try {
+    // Central batch endpoint handles up to 100 per call.
+    for (let off = 0; off < destinations.length; off += 100) {
+      const chunk = destinations.slice(off, off + 100);
+      const resp = await axios.post(url, { indicators: chunk }, {
+        headers: { "Content-Type": "application/json" },
+        timeout: 15000,
+      });
+      const results = resp.data?.results || {};
+      for (const ind of chunk) {
+        const rep = results[ind];
+        if (rep && rep.is_malicious) {
+          malicious.push({
+            destination: ind,
+            threat_score: rep.threat_score,
+            reasons: rep.reasons || [],
+          });
+        }
+      }
+    }
+  } catch (e) {
+    core.debug(`[Reputation] Enrichment failed (non-fatal): ${e.message}`);
+    return [];
+  }
+  malicious.sort((a, b) => b.threat_score - a.threat_score);
+  return malicious;
+}
+
 async function getContainerStats(containerId) {
   if (!containerId) return null;
   try {
@@ -147,7 +215,7 @@ async function getContainerStats(containerId) {
 // ----------------------------------------------------------------
 // GitHub Step Summary writer
 // ----------------------------------------------------------------
-async function writeStepSummary(stats, egressPolicy, containerId, baselineReport) {
+async function writeStepSummary(stats, egressPolicy, containerId, baselineReport, maliciousDests) {
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (!summaryPath) {
     core.debug("GITHUB_STEP_SUMMARY not set, skipping summary write.");
@@ -191,6 +259,25 @@ ${(stats.secret_details || []).map(s => {
 ${(stats.blocked_details || []).map(b =>
       `| \`${b.host || b.ip}\` | ${b.port} | ${b.step || "-"} |`
     ).join("\n")}
+`;
+  }
+
+  // Threat-intel section: egress destinations flagged malicious by reputation.
+  let threatIntelSection = "";
+  if (maliciousDests && maliciousDests.length > 0) {
+    alertIcon = "🚨";
+    threatIntelSection = `
+### 🛑 Malicious Egress Destinations (${maliciousDests.length})
+
+Outbound connections to destinations flagged by threat intelligence (URLhaus / ThreatFox / Tor / newly-registered):
+
+| Destination | Score | Why |
+|-------------|-------|-----|
+${maliciousDests.map(d =>
+      `| \`${d.destination}\` | ${d.threat_score} | ${(d.reasons || []).join("; ") || "-"} |`
+    ).join("\n")}
+
+> **Action Required:** Investigate these connections — they may indicate data exfiltration or a compromised dependency.
 `;
   }
 
@@ -286,6 +373,7 @@ ${rows}${more}
   const tlsCount = stats ? (stats.tls_connections || 0) : '–';
   const uniqueDests = stats ? (stats.unique_destinations || 0) : '–';
   const blockedCount = stats ? (stats.blocked_connections || 0) : '–';
+  const maliciousCount = (maliciousDests && maliciousDests.length) || 0;
 
   const serverUrl = core.getState("serverUrl") || "https://api.o3.security";
   const dashboardUrl = `${serverUrl}/projects`;
@@ -299,10 +387,13 @@ ${rows}${more}
 |--------|-------|
 | TLS/SSL connections captured | **${tlsCount}** |
 | Unique egress destinations | **${uniqueDests}** |
+| Malicious destinations (threat intel) | **${maliciousCount}** |
 | Connections blocked | **${blockedCount}** |
 | Egress policy | \`${egressPolicy || 'audit'}\` |
 
+${threatIntelSection}
 ${capturesSection}
+${egressSection}
 ${baselineSection}
 ---
 🛡️ Powered by [O3 Security ROC Agent](https://github.com/o3security/roc-agent)
@@ -723,7 +814,28 @@ async function cleanup() {
     };
     core.info(`[SummaryStat] Synthesized: ${baselineReport.observations} connections, ${stats.secrets_found} secret(s)`);
   }
-  await writeStepSummary(stats, egressPolicy, containerId, baselineReport);
+
+  // 6b. Threat-intel: score egress destinations against the central reputation
+  //     service. Catches exfil to known C2 / malware / Tor / fresh domains.
+  let maliciousDests = [];
+  try {
+    const dests = await collectEgressDestinations();
+    if (dests.length > 0) {
+      maliciousDests = await enrichDestinations(dests);
+      if (maliciousDests.length > 0) {
+        core.warning(
+          `🚨 O3 Security: ${maliciousDests.length} egress destination(s) flagged as malicious by threat intel: ` +
+          maliciousDests.map(d => d.destination).join(", ")
+        );
+      } else {
+        core.info(`[Reputation] Checked ${dests.length} destination(s); none flagged malicious.`);
+      }
+    }
+  } catch (e) {
+    core.debug(`[Reputation] step skipped (non-fatal): ${e.message}`);
+  }
+
+  await writeStepSummary(stats, egressPolicy, containerId, baselineReport, maliciousDests);
 
   // 7. Warn on secrets (binary already created the vuln via IngestCIBaseline at shutdown)
   if (stats && stats.secrets_found > 0) {
